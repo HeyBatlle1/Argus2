@@ -18,3 +18,5 @@ crossterm.workspace = true
 dirs = "5.0"
 argus-crypto = { path = "../argus-crypto" }
 urlencoding = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

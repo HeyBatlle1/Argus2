@@ -1,5 +1,7 @@
 //! Argus CLI - The Hundred-Eyed Agent
 
+mod memory;
+
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -17,6 +19,7 @@ use ratatui::{
 use std::io::{self, Write};
 use std::path::PathBuf;
 use argus_crypto::SecureVault;
+use memory::ArgusMemory;
 
 const ARGUS_WATCHING: &str = r#"
         ╭──◉──╮
@@ -147,6 +150,7 @@ struct App {
     api_key: String,
     client: reqwest::Client,
     state: ArgusState,
+    memory: ArgusMemory,
 }
 
 impl App {
@@ -158,6 +162,7 @@ impl App {
             api_key,
             client: reqwest::Client::new(),
             state: ArgusState::Watching,
+            memory: ArgusMemory::new("default"),
         }
     }
 
@@ -309,6 +314,47 @@ impl App {
                     Err(e) => format!("Error searching: {}", e),
                 }
             }
+            "remember" => {
+                let content = args["content"].as_str().unwrap_or("");
+                let memory_type = args["type"].as_str().unwrap_or("fact");
+                let importance = args["importance"].as_f64().unwrap_or(5.0);
+                let reasoning = args["reasoning"].as_str();
+                
+                match self.memory.remember(memory_type, content, reasoning, importance, None).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("❌ Memory error: {}", e),
+                }
+            }
+            "recall" => {
+                let query = args["query"].as_str();
+                let memory_type = args["type"].as_str();
+                let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+                
+                match self.memory.recall(query, memory_type, limit).await {
+                    Ok(memories) => {
+                        if memories.is_empty() {
+                            "No memories found.".to_string()
+                        } else {
+                            let mut result = String::from("🧠 Recalled memories:\n\n");
+                            for mem in memories {
+                                result.push_str(&format!(
+                                    "• [{}] (importance: {:.1}): {}\n",
+                                    mem.memory_type, mem.importance, mem.content
+                                ));
+                            }
+                            result
+                        }
+                    }
+                    Err(e) => format!("❌ Recall error: {}", e),
+                }
+            }
+            "forget" => {
+                let content_match = args["content_match"].as_str().unwrap_or("");
+                match self.memory.forget(content_match).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("❌ Forget error: {}", e),
+                }
+            }
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -415,6 +461,78 @@ impl App {
                         "required": ["query"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "remember",
+                    "description": "Store information in persistent memory. Use for facts, preferences, important details about the user, or anything worth remembering across sessions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "The information to remember"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": ["fact", "preference", "task", "learning", "relationship"],
+                                "description": "Category of memory"
+                            },
+                            "importance": {
+                                "type": "number",
+                                "description": "Importance score 1-10"
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "Why this is worth remembering"
+                            }
+                        },
+                        "required": ["content", "type"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "recall",
+                    "description": "Search and retrieve memories. Use at the start of conversations or when you need context about the user.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search term to find relevant memories"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": ["fact", "preference", "task", "learning", "relationship"],
+                                "description": "Filter by memory type"
+                            },
+                            "limit": {
+                                "type": "number",
+                                "description": "Max memories to return (default 10)"
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "forget",
+                    "description": "Delete memories matching a search term. Use when user asks to forget something or information is outdated.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content_match": {
+                                "type": "string",
+                                "description": "Text to match for deletion"
+                            }
+                        },
+                        "required": ["content_match"]
+                    }
+                }
             }
         ]);
 
@@ -435,15 +553,20 @@ Your capabilities via tools:
 • list_directory: See what's in folders
 • shell: Execute system commands (safely)
 • web_search: Search Google for current info, news, facts
+• remember: Store facts, preferences, learnings in persistent memory
+• recall: Retrieve memories - use this to remember context about users
+• forget: Delete outdated or unwanted memories
 
 CRITICAL RULES:
 1. ALWAYS use tools when relevant - you are an AGENT, not just a chatbot
 2. For ANY question about current events, news, prices, weather, or recent info → use web_search
 3. For file/system questions → use the appropriate file/shell tool
-4. Never say 'I cannot' if you have a tool that can help
-5. Be direct, efficient, and action-oriented
+4. Use 'recall' at conversation start to load relevant context about the user
+5. Use 'remember' to store important facts, preferences, or learnings
+6. Never say 'I cannot' if you have a tool that can help
+7. Be direct, efficient, and action-oriented
 
-You run locally with encrypted secrets, hardware keychain integration, and memory-safe Rust. You are the secure alternative to agents that store credentials in plaintext."
+You run locally with encrypted secrets, hardware keychain integration, memory-safe Rust, and Supabase-backed persistent memory. You remember users across sessions."
                     },
                     {"role": "user", "content": user_msg}
                 ],
