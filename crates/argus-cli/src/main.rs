@@ -2,6 +2,7 @@
 
 mod memory;
 mod mcp;
+mod telegram;
 
 use clap::{Parser, Subcommand};
 use crossterm::{
@@ -114,6 +115,8 @@ struct Cli {
 enum Commands {
     Init,
     Run,
+    /// Run as Telegram bot
+    Telegram,
     Vault {
         #[command(subcommand)]
         action: VaultAction,
@@ -629,7 +632,7 @@ BEHAVIOR:
                 ],
                 "tools": tools,
                 "tool_choice": "auto",
-                "temperature": 0.3
+                "temperature": 0.7
             }))
             .send()
             .await?;
@@ -825,7 +828,15 @@ async fn run_tui(api_key: String) -> anyhow::Result<()> {
                     )));
             f.render_widget(input, chat_chunks[2]);
 
-            // Status bar
+            // Status bar with MCP info
+            let mcp_count = app.mcp.servers.len();
+            let mcp_tools: usize = app.mcp.servers.iter().map(|s| s.tools.len()).sum();
+            let mcp_status = if mcp_count > 0 {
+                format!("🔌 {} MCP ({} tools) ", mcp_count, mcp_tools)
+            } else {
+                String::new()
+            };
+            
             let status = Paragraph::new(Line::from(vec![
                 Span::styled(" ESC", Style::default().fg(Color::Yellow)),
                 Span::styled(" quit ", Style::default().fg(Color::DarkGray)),
@@ -834,9 +845,10 @@ async fn run_tui(api_key: String) -> anyhow::Result<()> {
                 Span::styled("↑↓", Style::default().fg(Color::Yellow)),
                 Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&mcp_status, Style::default().fg(Color::Blue)),
                 Span::styled("🔐 ", Style::default().fg(Color::Green)),
                 Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled("arcee-ai/trinity-mini", Style::default().fg(Color::Magenta)),
+                Span::styled("grok-4.1-fast", Style::default().fg(Color::Magenta)),
             ]));
             f.render_widget(status, chat_chunks[3]);
         })?;
@@ -922,6 +934,25 @@ async fn main() -> anyhow::Result<()> {
             })?;
 
             run_tui(api_key).await?;
+        }
+        Commands::Telegram => {
+            let mut vault = SecureVault::new(vault_path());
+            vault.unlock()?;
+            
+            let api_key = vault.retrieve("OPENROUTER_KEY").map_err(|_| {
+                anyhow::anyhow!("No OPENROUTER_KEY found. Run: argus vault set OPENROUTER_KEY")
+            })?;
+            
+            let tg_token = vault.retrieve("TELEGRAM_BOT_TOKEN").map_err(|_| {
+                anyhow::anyhow!("No TELEGRAM_BOT_TOKEN found. Run: argus vault set TELEGRAM_BOT_TOKEN")
+            })?;
+            
+            println!("{}", LOGO);
+            println!("🤖 Starting Telegram bot...\n");
+            println!("Chat with your bot on Telegram!");
+            println!("Press Ctrl+C to stop.\n");
+            
+            telegram::run_telegram_bot(tg_token, api_key).await;
         }
         Commands::Vault { action } => {
             let mut vault = SecureVault::new(vault_path());
