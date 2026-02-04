@@ -555,7 +555,7 @@ impl App {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({
-                "model": "x-ai/grok-4-fast",
+                "model": "x-ai/grok-4.1-fast",
                 "messages": [
                     {
                         "role": "system", 
@@ -636,7 +636,7 @@ You run locally with encrypted secrets, hardware keychain, and memory-safe Rust.
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
                 .json(&serde_json::json!({
-                    "model": "x-ai/grok-4-fast",
+                    "model": "x-ai/grok-4.1-fast",
                     "messages": messages,
                     "tools": tools,
                     "tool_choice": "auto"
