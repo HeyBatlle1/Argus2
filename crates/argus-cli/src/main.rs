@@ -116,6 +116,10 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -124,6 +128,16 @@ enum VaultAction {
     Get { key: String },
     List,
     Delete { key: String },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Configure Supabase for cloud memory sync
+    Configure { url: String, key: String },
+    /// Check memory system status
+    Status,
+    /// List all stored memories
+    List,
 }
 
 fn vault_path() -> PathBuf {
@@ -162,7 +176,7 @@ impl App {
             api_key,
             client: reqwest::Client::new(),
             state: ArgusState::Watching,
-            memory: ArgusMemory::new("default"),
+            memory: ArgusMemory::new(),
         }
     }
 
@@ -320,7 +334,7 @@ impl App {
                 let importance = args["importance"].as_f64().unwrap_or(5.0);
                 let reasoning = args["reasoning"].as_str();
                 
-                match self.memory.remember(memory_type, content, reasoning, importance, None).await {
+                match self.memory.remember(memory_type, content, reasoning, importance, None) {
                     Ok(msg) => msg,
                     Err(e) => format!("❌ Memory error: {}", e),
                 }
@@ -330,16 +344,16 @@ impl App {
                 let memory_type = args["type"].as_str();
                 let limit = args["limit"].as_u64().unwrap_or(10) as usize;
                 
-                match self.memory.recall(query, memory_type, limit).await {
+                match self.memory.recall(query, memory_type, limit) {
                     Ok(memories) => {
                         if memories.is_empty() {
                             "No memories found.".to_string()
                         } else {
                             let mut result = String::from("🧠 Recalled memories:\n\n");
-                            for mem in memories {
+                            for m in memories {
                                 result.push_str(&format!(
                                     "• [{}] (importance: {:.1}): {}\n",
-                                    mem.memory_type, mem.importance, mem.content
+                                    m.memory_type, m.importance, m.content
                                 ));
                             }
                             result
@@ -350,7 +364,7 @@ impl App {
             }
             "forget" => {
                 let content_match = args["content_match"].as_str().unwrap_or("");
-                match self.memory.forget(content_match).await {
+                match self.memory.forget(content_match) {
                     Ok(msg) => msg,
                     Err(e) => format!("❌ Forget error: {}", e),
                 }
@@ -554,19 +568,18 @@ Your capabilities via tools:
 • shell: Execute system commands (safely)
 • web_search: Search Google for current info, news, facts
 • remember: Store facts, preferences, learnings in persistent memory
-• recall: Retrieve memories - use this to remember context about users
+• recall: Retrieve memories about the user
 • forget: Delete outdated or unwanted memories
 
 CRITICAL RULES:
-1. ALWAYS use tools when relevant - you are an AGENT, not just a chatbot
-2. For ANY question about current events, news, prices, weather, or recent info → use web_search
-3. For file/system questions → use the appropriate file/shell tool
-4. Use 'recall' at conversation start to load relevant context about the user
-5. Use 'remember' to store important facts, preferences, or learnings
-6. Never say 'I cannot' if you have a tool that can help
-7. Be direct, efficient, and action-oriented
+1. ALWAYS respond directly to the user's question first
+2. Only use tools when actually needed for the task
+3. Do NOT call 'recall' unless the user asks about something you should remember
+4. Use 'remember' when the user tells you important facts about themselves
+5. Use web_search for current events, news, prices, weather
+6. Be direct and action-oriented - no fluff
 
-You run locally with encrypted secrets, hardware keychain integration, memory-safe Rust, and Supabase-backed persistent memory. You remember users across sessions."
+You run locally with encrypted secrets, hardware keychain, and memory-safe Rust."
                     },
                     {"role": "user", "content": user_msg}
                 ],
@@ -578,10 +591,22 @@ You run locally with encrypted secrets, hardware keychain integration, memory-sa
 
         let json: serde_json::Value = resp.json().await?;
         
-        // Check for tool calls
+        // Check for tool calls - need to loop until model gives final response
         if let Some(tool_calls) = json["choices"][0]["message"]["tool_calls"].as_array() {
+            let mut messages = vec![
+                serde_json::json!({
+                    "role": "system", 
+                    "content": "You are ARGUS - The Hundred-Eyed Agent. Be direct, respond to the user based on the tool results. No fluff."
+                }),
+                serde_json::json!({"role": "user", "content": user_msg}),
+                json["choices"][0]["message"].clone(),
+            ];
+            
+            // Execute each tool and collect results
+            let mut tool_results = Vec::new();
             for tool_call in tool_calls {
                 let name = tool_call["function"]["name"].as_str().unwrap_or("");
+                let tool_call_id = tool_call["id"].as_str().unwrap_or("");
                 let args: serde_json::Value = serde_json::from_str(
                     tool_call["function"]["arguments"].as_str().unwrap_or("{}")
                 ).unwrap_or(serde_json::json!({}));
@@ -589,9 +614,46 @@ You run locally with encrypted secrets, hardware keychain integration, memory-sa
                 self.state = ArgusState::ToolActive;
                 let result = self.execute_tool(name, &args).await;
                 
+                // Show tool execution to user
                 self.messages.push(ChatMessage {
                     role: "Argus".to_string(),
-                    content: format!("🔧 Tool: {}\n📤 Result:\n{}", name, result),
+                    content: format!("🔧 {}: {}", name, result.lines().next().unwrap_or(&result)),
+                });
+                
+                tool_results.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result
+                }));
+            }
+            
+            // Add tool results to messages
+            messages.extend(tool_results);
+            
+            // Get follow-up response from model
+            let follow_up = self.client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "x-ai/grok-4-fast",
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto"
+                }))
+                .send()
+                .await?;
+            
+            let follow_json: serde_json::Value = follow_up.json().await?;
+            let content = follow_json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("Done.")
+                .to_string();
+            
+            if !content.is_empty() {
+                self.messages.push(ChatMessage {
+                    role: "Argus".to_string(),
+                    content,
                 });
             }
             self.state = ArgusState::Success;
@@ -779,16 +841,32 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init => {
             println!("{}", LOGO);
             println!("👁️  Initializing Argus...\n");
+            
+            let argus_dir = dirs::home_dir().unwrap().join(".argus");
+            std::fs::create_dir_all(&argus_dir)?;
+            
+            // Install memory.py
+            let memory_script = include_str!("../../../scripts/memory.py");
+            let memory_path = argus_dir.join("memory.py");
+            std::fs::write(&memory_path, memory_script)?;
+            println!("✅ Memory system installed.");
+            
+            // Initialize vault
             let path = vault_path();
             if path.exists() {
-                println!("✅ Vault already exists at {:?}", path);
-                return Ok(());
+                println!("✅ Vault already exists.");
+            } else {
+                SecureVault::init(path)?;
+                println!("✅ Vault created.");
+                println!("✅ Master key stored in system keychain.");
             }
-            SecureVault::init(path)?;
-            println!("✅ Vault created.");
-            println!("✅ Master key stored in system keychain.");
+            
             println!("\n🔐 Your secrets are encrypted. Not plaintext. Not ever.\n");
-            println!("Next: argus vault set OPENROUTER_KEY <your-key>");
+            println!("Next steps:");
+            println!("  1. argus vault set OPENROUTER_KEY <your-key>");
+            println!("  2. argus run");
+            println!("\n💡 Optional: For cloud memory sync, run:");
+            println!("  argus memory configure <supabase-url> <supabase-key>");
         }
         Commands::Run => {
             let mut vault = SecureVault::new(vault_path());
@@ -829,6 +907,61 @@ async fn main() -> anyhow::Result<()> {
                 VaultAction::Delete { key } => {
                     vault.delete(&key)?;
                     println!("✅ Deleted: {}", key);
+                }
+            }
+        }
+        Commands::Memory { action } => {
+            let memory_py = dirs::home_dir().unwrap().join(".argus").join("memory.py");
+            if !memory_py.exists() {
+                println!("❌ Memory system not installed. Run: argus init");
+                return Ok(());
+            }
+            
+            match action {
+                MemoryAction::Configure { url, key } => {
+                    let data = serde_json::json!({
+                        "supabase_url": url,
+                        "supabase_key": key
+                    });
+                    let output = std::process::Command::new("python3")
+                        .arg(&memory_py)
+                        .arg("configure")
+                        .arg(data.to_string())
+                        .output()?;
+                    println!("{}", String::from_utf8_lossy(&output.stdout));
+                }
+                MemoryAction::Status => {
+                    let output = std::process::Command::new("python3")
+                        .arg(&memory_py)
+                        .arg("status")
+                        .arg("{}")
+                        .output()?;
+                    let resp: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                    println!("\n🧠 Memory System Status:");
+                    println!("   Supabase: {}", if resp["supabase_configured"].as_bool().unwrap_or(false) { "✅ Configured" } else { "❌ Not configured (using local SQLite)" });
+                    println!("   SQLite:   {}", resp["sqlite_path"].as_str().unwrap_or("unknown"));
+                    println!();
+                }
+                MemoryAction::List => {
+                    let output = std::process::Command::new("python3")
+                        .arg(&memory_py)
+                        .arg("list")
+                        .arg("{}")
+                        .output()?;
+                    let resp: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                    if let Some(memories) = resp["memories"].as_array() {
+                        if memories.is_empty() {
+                            println!("\n🧠 No memories stored yet.\n");
+                        } else {
+                            println!("\n🧠 Stored Memories:");
+                            for m in memories {
+                                println!("   • [{}] {}", 
+                                    m["type"].as_str().unwrap_or("?"),
+                                    m["content"].as_str().unwrap_or("?"));
+                            }
+                            println!();
+                        }
+                    }
                 }
             }
         }

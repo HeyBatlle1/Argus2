@@ -1,222 +1,138 @@
-//! Argus Memory System - Supabase-backed persistent memory
+//! Argus Memory System - Python Bridge
+//! Shells out to memory.py for persistence (Supabase or SQLite)
 
+use std::process::Command;
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 
-const SUPABASE_URL: &str = "https://YOUR_SUPABASE_PROJECT_ID_2.supabase.co";
-const SUPABASE_KEY: &str = "sb_publishable_1IG8vV7Q6hamc_19TLkQ3g_qUeZV9As";
+fn memory_script_path() -> String {
+    // Check if running from repo (dev) or installed
+    let dev_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .map(|p| p.join("../../scripts/memory.py"));
+    
+    if let Some(p) = dev_path {
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    
+    // Fallback to ~/.argus/memory.py
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".argus")
+        .join("memory.py")
+        .to_string_lossy()
+        .to_string()
+}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Memory {
-    pub id: Option<String>,
-    pub user_id: String,
+#[derive(Debug, Deserialize)]
+struct MemoryResponse {
+    success: bool,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    memories: Option<Vec<MemoryRecord>>,
+    #[serde(default)]
+    deleted: Option<i32>,
+    #[serde(default)]
+    backend: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MemoryRecord {
     #[serde(rename = "type")]
     pub memory_type: String,
     pub content: String,
-    pub reasoning: Option<String>,
-    pub context: Option<String>,
     pub importance: f64,
-    pub tags: Option<Vec<String>>,
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UserProfile {
-    pub user_id: String,
-    pub display_name: Option<String>,
-    pub preferences: serde_json::Value,
-    pub communication_style: serde_json::Value,
-    pub technical_level: String,
-}
-
-pub struct ArgusMemory {
-    client: reqwest::Client,
-    user_id: String,
-}
+pub struct ArgusMemory;
 
 impl ArgusMemory {
-    pub fn new(user_id: &str) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            user_id: user_id.to_string(),
-        }
+    pub fn new() -> Self {
+        Self
     }
 
-    /// Store a new memory
-    pub async fn remember(&self, memory_type: &str, content: &str, reasoning: Option<&str>, importance: f64, tags: Option<Vec<String>>) -> Result<String, String> {
-        let memory = serde_json::json!({
-            "user_id": self.user_id,
+    fn call_python(&self, command: &str, data: &serde_json::Value) -> Result<MemoryResponse, String> {
+        let script = memory_script_path();
+        let json_arg = serde_json::to_string(data).map_err(|e| e.to_string())?;
+        
+        let output = Command::new("python3")
+            .arg(&script)
+            .arg(command)
+            .arg(&json_arg)
+            .output()
+            .map_err(|e| format!("Failed to run memory.py: {}", e))?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("memory.py failed: {}", stderr));
+        }
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        serde_json::from_str(&stdout).map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    pub fn remember(
+        &self,
+        memory_type: &str,
+        content: &str,
+        reasoning: Option<&str>,
+        importance: f64,
+        _tags: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        let data = serde_json::json!({
             "type": memory_type,
             "content": content,
             "reasoning": reasoning,
-            "importance": importance,
-            "tags": tags
+            "importance": importance
         });
-
-        let resp = self.client
-            .post(format!("{}/rest/v1/argus_memories", SUPABASE_URL))
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .header("Content-Type", "application/json")
-            .header("Prefer", "return=representation")
-            .json(&memory)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok(format!("✅ Remembered: {}", &content[..content.len().min(50)]))
-        } else {
-            let err = resp.text().await.unwrap_or_default();
-            Err(format!("Failed to store memory: {}", err))
-        }
-    }
-
-    /// Recall memories by type or search
-    pub async fn recall(&self, query: Option<&str>, memory_type: Option<&str>, limit: usize) -> Result<Vec<Memory>, String> {
-        let mut url = format!(
-            "{}/rest/v1/argus_memories?user_id=eq.{}&order=importance.desc,created_at.desc&limit={}",
-            SUPABASE_URL, self.user_id, limit
-        );
-
-        if let Some(t) = memory_type {
-            url.push_str(&format!("&type=eq.{}", t));
-        }
-
-        if let Some(q) = query {
-            url.push_str(&format!("&content=ilike.*{}*", urlencoding::encode(q)));
-        }
-
-        let resp = self.client
-            .get(&url)
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            let memories: Vec<Memory> = resp.json().await.map_err(|e| e.to_string())?;
-            Ok(memories)
-        } else {
-            Err("Failed to recall memories".to_string())
-        }
-    }
-
-    /// Get all memories for context loading
-    pub async fn load_context(&self) -> Result<String, String> {
-        let memories = self.recall(None, None, 20).await?;
         
-        if memories.is_empty() {
-            return Ok("No memories stored yet.".to_string());
+        let resp = self.call_python("remember", &data)?;
+        
+        if resp.success {
+            Ok(format!("✅ {}", resp.message.unwrap_or_else(|| "Remembered".to_string())))
+        } else {
+            Err(resp.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
-
-        let mut context = String::from("## Argus Memory Context\n\n");
-        for mem in memories {
-            context.push_str(&format!(
-                "- [{}] (importance: {:.1}): {}\n",
-                mem.memory_type, mem.importance, mem.content
-            ));
-        }
-        Ok(context)
     }
 
-    /// Store or update user profile
-    pub async fn update_user_profile(&self, display_name: Option<&str>, preferences: Option<serde_json::Value>) -> Result<String, String> {
-        let profile = serde_json::json!({
-            "user_id": self.user_id,
-            "display_name": display_name,
-            "preferences": preferences.unwrap_or(serde_json::json!({})),
-            "last_interaction": Utc::now()
+    pub fn recall(
+        &self,
+        query: Option<&str>,
+        memory_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, String> {
+        let data = serde_json::json!({
+            "query": query,
+            "type": memory_type,
+            "limit": limit
         });
-
-        let resp = self.client
-            .post(format!("{}/rest/v1/argus_user_profiles", SUPABASE_URL))
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .header("Content-Type", "application/json")
-            .header("Prefer", "resolution=merge-duplicates,return=representation")
-            .json(&profile)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok("✅ Profile updated".to_string())
+        
+        let resp = self.call_python("recall", &data)?;
+        
+        if resp.success {
+            Ok(resp.memories.unwrap_or_default())
         } else {
-            Err("Failed to update profile".to_string())
+            Err(resp.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
-    /// Get user profile
-    pub async fn get_user_profile(&self) -> Result<Option<UserProfile>, String> {
-        let url = format!(
-            "{}/rest/v1/argus_user_profiles?user_id=eq.{}&limit=1",
-            SUPABASE_URL, self.user_id
-        );
-
-        let resp = self.client
-            .get(&url)
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            let profiles: Vec<UserProfile> = resp.json().await.map_err(|e| e.to_string())?;
-            Ok(profiles.into_iter().next())
-        } else {
-            Err("Failed to get profile".to_string())
-        }
-    }
-
-    /// Store a learning (from mistakes or discoveries)
-    pub async fn learn(&self, lesson: &str, source: &str, importance: i32) -> Result<String, String> {
-        let learning = serde_json::json!({
-            "user_id": self.user_id,
-            "lesson": lesson,
-            "source": source,
-            "importance": importance,
-            "applies_to": "all_users"
+    pub fn forget(&self, content_match: &str) -> Result<String, String> {
+        let data = serde_json::json!({
+            "match": content_match
         });
-
-        let resp = self.client
-            .post(format!("{}/rest/v1/argus_learnings", SUPABASE_URL))
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .header("Content-Type", "application/json")
-            .json(&learning)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok(format!("✅ Learned: {}", lesson))
+        
+        let resp = self.call_python("forget", &data)?;
+        
+        if resp.success {
+            Ok(format!("✅ Forgot {} memories", resp.deleted.unwrap_or(0)))
         } else {
-            Err("Failed to store learning".to_string())
-        }
-    }
-
-    /// Delete a memory by content match
-    pub async fn forget(&self, content_match: &str) -> Result<String, String> {
-        let url = format!(
-            "{}/rest/v1/argus_memories?user_id=eq.{}&content=ilike.*{}*",
-            SUPABASE_URL, self.user_id, urlencoding::encode(content_match)
-        );
-
-        let resp = self.client
-            .delete(&url)
-            .header("apikey", SUPABASE_KEY)
-            .header("Authorization", format!("Bearer {}", SUPABASE_KEY))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok(format!("✅ Forgot memories matching: {}", content_match))
-        } else {
-            Err("Failed to delete memory".to_string())
+            Err(resp.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 }
