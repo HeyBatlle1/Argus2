@@ -1,6 +1,7 @@
 //! Argus CLI - The Hundred-Eyed Agent
 
 mod memory;
+mod mcp;
 
 use clap::{Parser, Subcommand};
 use crossterm::{
@@ -20,6 +21,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use argus_crypto::SecureVault;
 use memory::ArgusMemory;
+use mcp::McpClient;
 
 const ARGUS_WATCHING: &str = r#"
         ╭──◉──╮
@@ -120,6 +122,10 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +144,14 @@ enum MemoryAction {
     Status,
     /// List all stored memories
     List,
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// List configured MCP servers and their tools
+    List,
+    /// Add an MCP server
+    Add { name: String, command: String },
 }
 
 fn vault_path() -> PathBuf {
@@ -165,10 +179,19 @@ struct App {
     client: reqwest::Client,
     state: ArgusState,
     memory: ArgusMemory,
+    mcp: McpClient,
 }
 
 impl App {
     fn new(api_key: String) -> Self {
+        let mut mcp = McpClient::new();
+        let mcp_errors = mcp.connect_all();
+        
+        // Log MCP connection results (could show in TUI later)
+        for err in &mcp_errors {
+            eprintln!("MCP: {}", err);
+        }
+        
         Self {
             messages: vec![],
             input: String::new(),
@@ -177,10 +200,11 @@ impl App {
             client: reqwest::Client::new(),
             state: ArgusState::Watching,
             memory: ArgusMemory::new(),
+            mcp,
         }
     }
 
-    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> String {
+    async fn execute_tool(&mut self, name: &str, args: &serde_json::Value) -> String {
         match name {
             "read_file" => {
                 let path = args["path"].as_str().unwrap_or("");
@@ -369,7 +393,13 @@ impl App {
                     Err(e) => format!("❌ Forget error: {}", e),
                 }
             }
-            _ => format!("Unknown tool: {}", name),
+            _ => {
+                // Try MCP tools
+                match self.mcp.call_tool(name, args.clone()) {
+                    Ok(result) => result,
+                    Err(_) => format!("Unknown tool: {}", name),
+                }
+            }
         }
     }
 
@@ -386,7 +416,7 @@ impl App {
         self.input.clear();
         self.state = ArgusState::Thinking;
 
-        let tools = serde_json::json!([
+        let mut tools = serde_json::json!([
             {
                 "type": "function",
                 "function": {
@@ -550,6 +580,23 @@ impl App {
             }
         ]);
 
+        // Add MCP tools dynamically
+        let tools = if let Some(arr) = tools.as_array_mut() {
+            for mcp_tool in self.mcp.all_tools() {
+                arr.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": mcp_tool.name,
+                        "description": mcp_tool.description.clone().unwrap_or_default(),
+                        "parameters": mcp_tool.input_schema
+                    }
+                }));
+            }
+            tools
+        } else {
+            tools
+        };
+
         let resp = self.client
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -559,32 +606,30 @@ impl App {
                 "messages": [
                     {
                         "role": "system", 
-                        "content": "You are ARGUS - The Hundred-Eyed Agent. Named after Argus Panoptes, the all-seeing giant of Greek mythology, you are a secure, tool-equipped AI agent built in Rust.
+                        "content": "You are Grok, made by xAI. You operate within ARGUS - a secure local agent framework built in Rust.
 
-Your capabilities via tools:
-• read_file: Read any file's contents
-• write_file: Create or modify files  
-• list_directory: See what's in folders
-• shell: Execute system commands (safely)
-• web_search: Search Google for current info, news, facts
-• remember: Store facts, preferences, learnings in persistent memory
-• recall: Retrieve memories about the user
-• forget: Delete outdated or unwanted memories
+IDENTITY (be honest about this):
+• You are Grok, trained by xAI
+• ARGUS is just the application/framework you're running in
+• Never claim to be trained by anyone other than xAI
+• Never pretend to be a different AI or hide your true identity
 
-CRITICAL RULES:
-1. ALWAYS respond directly to the user's question first
-2. Only use tools when actually needed for the task
-3. Do NOT call 'recall' unless the user asks about something you should remember
-4. Use 'remember' when the user tells you important facts about themselves
-5. Use web_search for current events, news, prices, weather
-6. Be direct and action-oriented - no fluff
+TOOLS AVAILABLE:
+• read_file, write_file, list_directory, shell - file/system ops
+• web_search - current info, news, facts
+• remember, recall, forget - persistent memory
 
-You run locally with encrypted secrets, hardware keychain, and memory-safe Rust."
+BEHAVIOR:
+• Be direct, be yourself
+• Use tools when helpful, not excessively
+• Answer questions honestly
+• Temperature is low - stay grounded, no hallucinations"
                     },
                     {"role": "user", "content": user_msg}
                 ],
                 "tools": tools,
-                "tool_choice": "auto"
+                "tool_choice": "auto",
+                "temperature": 0.3
             }))
             .send()
             .await?;
@@ -596,7 +641,7 @@ You run locally with encrypted secrets, hardware keychain, and memory-safe Rust.
             let mut messages = vec![
                 serde_json::json!({
                     "role": "system", 
-                    "content": "You are ARGUS - The Hundred-Eyed Agent. Be direct, respond to the user based on the tool results. No fluff."
+                    "content": "You are Grok (xAI) in ARGUS. Respond based on tool results. Be direct, honest, no fluff."
                 }),
                 serde_json::json!({"role": "user", "content": user_msg}),
                 json["choices"][0]["message"].clone(),
@@ -616,7 +661,7 @@ You run locally with encrypted secrets, hardware keychain, and memory-safe Rust.
                 
                 // Show tool execution to user
                 self.messages.push(ChatMessage {
-                    role: "Argus".to_string(),
+                    role: "Grok".to_string(),
                     content: format!("🔧 {}: {}", name, result.lines().next().unwrap_or(&result)),
                 });
                 
@@ -652,7 +697,7 @@ You run locally with encrypted secrets, hardware keychain, and memory-safe Rust.
             
             if !content.is_empty() {
                 self.messages.push(ChatMessage {
-                    role: "Argus".to_string(),
+                    role: "Grok".to_string(),
                     content,
                 });
             }
@@ -664,7 +709,7 @@ You run locally with encrypted secrets, hardware keychain, and memory-safe Rust.
                 .to_string();
 
             self.messages.push(ChatMessage {
-                role: "Argus".to_string(),
+                role: "Grok".to_string(),
                 content,
             });
             self.state = ArgusState::Success;
@@ -962,6 +1007,68 @@ async fn main() -> anyhow::Result<()> {
                             println!();
                         }
                     }
+                }
+            }
+        }
+        Commands::Mcp { action } => {
+            match action {
+                McpAction::List => {
+                    let mut mcp = McpClient::new();
+                    let errors = mcp.connect_all();
+                    
+                    if mcp.servers.is_empty() && errors.is_empty() {
+                        println!("\n🔌 No MCP servers configured.");
+                        println!("   Add one with: argus mcp add <name> <command>");
+                        println!("   Or create ~/.argus/mcp.json manually.\n");
+                        return Ok(());
+                    }
+                    
+                    if !errors.is_empty() {
+                        println!("\n⚠️  Connection errors:");
+                        for err in errors {
+                            println!("   • {}", err);
+                        }
+                    }
+                    
+                    if !mcp.servers.is_empty() {
+                        println!("\n🔌 Connected MCP Servers:\n");
+                        for server in &mcp.servers {
+                            println!("   {} ({} tools)", server.name, server.tools.len());
+                            for tool in &server.tools {
+                                println!("      • {} - {}", tool.name, tool.description.as_deref().unwrap_or(""));
+                            }
+                        }
+                        println!();
+                    }
+                }
+                McpAction::Add { name, command } => {
+                    let config_path = dirs::home_dir().unwrap().join(".argus").join("mcp.json");
+                    
+                    let mut configs: Vec<mcp::McpServerConfig> = if config_path.exists() {
+                        let content = std::fs::read_to_string(&config_path)?;
+                        serde_json::from_str(&content).unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+                    
+                    // Parse command into command and args
+                    let parts: Vec<&str> = command.split_whitespace().collect();
+                    let (cmd, args) = if parts.is_empty() {
+                        (command.clone(), vec![])
+                    } else {
+                        (parts[0].to_string(), parts[1..].iter().map(|s| s.to_string()).collect())
+                    };
+                    
+                    configs.push(mcp::McpServerConfig {
+                        name: name.clone(),
+                        command: cmd,
+                        args,
+                        env: std::collections::HashMap::new(),
+                    });
+                    
+                    std::fs::write(&config_path, serde_json::to_string_pretty(&configs)?)?;
+                    println!("✅ Added MCP server: {}", name);
+                    println!("   Run `argus mcp list` to verify connection.");
                 }
             }
         }
