@@ -1,6 +1,7 @@
-//! Argus Memory - Encrypted storage and Supabase sync
+//! Argus Memory - Native Rust SQLite storage
+//!
+//! No more Python subprocess bridge. Direct SQLite with rusqlite.
 
-pub mod encrypted;
-pub mod supabase;
+pub mod sqlite;
 
-// TODO: Implement memory layer
+pub use sqlite::SqliteMemory;

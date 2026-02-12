@@ -11,3 +11,4 @@ ring.workspace = true
 keyring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+zeroize.workspace = true
