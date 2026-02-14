@@ -3,6 +3,7 @@
 //! Main entrypoint for the Argus command-line interface.
 
 mod telegram;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -31,6 +32,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run interactive TUI mode
+    Tui {
+        /// OpenRouter API key (or use vault)
+        #[arg(short, long)]
+        api_key: Option<String>,
+    },
+
     /// Run Telegram bot
     Telegram {
         /// Telegram bot token (or use vault)
@@ -98,8 +106,25 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Vault { action }) => {
             handle_vault_command(&mut vault, action)?;
         }
+        Some(Commands::Tui { api_key }) => {
+            let key = if let Some(k) = api_key {
+                k
+            } else {
+                vault.retrieve("openrouter_api_key")
+                    .map_err(|e| anyhow::anyhow!("OpenRouter API key not found. Set it with: argus vault set openrouter_api_key YOUR_KEY\nError: {}", e))?
+            };
+
+            println!("{}", LOGO);
+            tui::run_tui(key).await?;
+        }
+        None => {
+            let key = vault.retrieve("openrouter_api_key")
+                .map_err(|e| anyhow::anyhow!("OpenRouter API key not found. Set it with: argus vault set openrouter_api_key YOUR_KEY\nError: {}", e))?;
+
+            println!("{}", LOGO);
+            tui::run_tui(key).await?;
+        }
         Some(Commands::Telegram { token }) => {
-            // Get token from CLI arg or vault
             let bot_token = if let Some(t) = token {
                 t
             } else {
@@ -111,12 +136,6 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to get OpenRouter API key from vault: {}", e))?;
 
             telegram::run_telegram_bot(bot_token, openrouter_api_key).await;
-        }
-        None => {
-            println!("{}", LOGO);
-            println!("Use `argus --help` to see available commands.");
-            println!("Use `argus telegram` to start the Telegram bot.");
-            println!("Use `argus vault` to manage credentials.");
         }
     }
 
