@@ -92,24 +92,32 @@ async fn main() -> anyhow::Result<()> {
     // Parse CLI args
     let cli = Cli::parse();
 
-    // Initialize vault
+    // Initialize vault only if not in daemon mode (daemon uses env vars in Docker)
     let vault_file = vault_path();
-    if let Some(parent) = vault_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut vault = if vault_file.exists() {
-        let mut v = SecureVault::new(vault_file.clone());
-        v.unlock()?;
-        v
+    let mut vault = if matches!(cli.command, Some(Commands::Daemon)) {
+        // Daemon mode: skip vault (uses env vars), create dummy vault
+        None
     } else {
-        SecureVault::init(vault_file.clone())?
+        // Other modes: initialize vault normally
+        if let Some(parent) = vault_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let v = if vault_file.exists() {
+            let mut v = SecureVault::new(vault_file.clone());
+            v.unlock()?;
+            v
+        } else {
+            SecureVault::init(vault_file.clone())?
+        };
+        Some(v)
     };
 
     match cli.command {
         Some(Commands::Vault { action }) => {
-            handle_vault_command(&mut vault, action)?;
+            handle_vault_command(vault.as_mut().unwrap(), action)?;
         }
         Some(Commands::Tui { api_key }) => {
+            let vault = vault.as_mut().unwrap();
             let key = if let Some(k) = api_key {
                 k
             } else {
@@ -121,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             tui::run_tui(key).await?;
         }
         None => {
+            let vault = vault.as_mut().unwrap();
             let key = vault.retrieve("openrouter_api_key")
                 .map_err(|e| anyhow::anyhow!("OpenRouter API key not found. Set it with: argus vault set openrouter_api_key YOUR_KEY\nError: {}", e))?;
 
@@ -128,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
             tui::run_tui(key).await?;
         }
         Some(Commands::Telegram { token }) => {
+            let vault = vault.as_mut().unwrap();
             let bot_token = if let Some(t) = token {
                 t
             } else {
@@ -143,15 +153,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Daemon) => {
             println!("🔴 Argus daemon starting...");
 
-            // Try vault first, then fall back to env vars (for Docker)
-            let bot_token = vault.retrieve("telegram_bot_token")
-                .ok()
-                .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok());
+            // Env vars only in daemon mode (vault is None here)
+            let bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
 
-            let api_key = vault.retrieve("openrouter_api_key")
-                .ok()
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                .ok_or_else(|| anyhow::anyhow!("No OpenRouter API key found in vault or OPENROUTER_API_KEY env var"))?;
+            let api_key = std::env::var("OPENROUTER_API_KEY")
+                .map_err(|_| anyhow::anyhow!("No OPENROUTER_API_KEY env var set"))?;
 
             match bot_token {
                 Some(token) => {
@@ -160,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
                     telegram::run_telegram_bot(token, api_key).await;
                 }
                 None => {
-                    println!("⚠ No telegram_bot_token in vault or TELEGRAM_BOT_TOKEN env var");
+                    println!("⚠ No TELEGRAM_BOT_TOKEN env var set");
                     println!("✓ Daemon running idle (Ctrl+C to stop)");
 
                     use tokio::signal;
