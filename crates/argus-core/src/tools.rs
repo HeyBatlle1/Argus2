@@ -133,6 +133,31 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
                     "required": ["content_match"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "http_request",
+                "description": "Make an HTTP request to a URL. Supports GET, POST, PUT, DELETE methods. Useful for calling APIs, fetching web pages, or interacting with web services.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL to request" },
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "POST", "PUT", "DELETE"],
+                            "description": "HTTP method (default: GET)"
+                        },
+                        "body": { "type": "string", "description": "Request body (for POST/PUT)" },
+                        "headers": {
+                            "type": "object",
+                            "description": "Additional headers as key-value pairs",
+                            "additionalProperties": { "type": "string" }
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
         }
     ]).as_array().unwrap().clone()
 }
@@ -157,6 +182,7 @@ pub async fn execute_builtin(
         "remember" => Some(tool_remember(args, memory)),
         "recall" => Some(tool_recall(args, memory)),
         "forget" => Some(tool_forget(args, memory)),
+        "http_request" => Some(tool_http_request(args, http_client).await),
         _ => None, // Not a built-in - caller should try MCP
     }
 }
@@ -390,5 +416,54 @@ fn tool_forget(args: &Value, memory: &dyn MemoryBackend) -> String {
     match memory.forget(content_match) {
         Ok(msg) => msg,
         Err(e) => format!("❌ Forget error: {}", e),
+    }
+}
+
+async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
+    let url = args["url"].as_str().unwrap_or("");
+    if url.is_empty() {
+        return "No URL provided".to_string();
+    }
+
+    let method = args["method"].as_str().unwrap_or("GET");
+
+    let mut builder = match method {
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "DELETE" => client.delete(url),
+        _ => client.get(url),
+    };
+
+    // Add custom headers
+    if let Some(headers) = args["headers"].as_object() {
+        for (key, val) in headers {
+            if let Some(v) = val.as_str() {
+                builder = builder.header(key.as_str(), v);
+            }
+        }
+    }
+
+    // Add body for POST/PUT
+    if let Some(body) = args["body"].as_str() {
+        builder = builder.body(body.to_string());
+    }
+
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let status_text = resp.status().to_string();
+            match resp.text().await {
+                Ok(body) => {
+                    let truncated = if body.len() > 8000 {
+                        format!("{}...\n[truncated, {} bytes total]", &body[..8000], body.len())
+                    } else {
+                        body
+                    };
+                    format!("HTTP {} {}\n\n{}", status, status_text, truncated)
+                }
+                Err(e) => format!("HTTP {} {} (body read error: {})", status, status_text, e),
+            }
+        }
+        Err(e) => format!("HTTP request failed: {}", e),
     }
 }

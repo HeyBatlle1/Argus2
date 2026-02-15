@@ -1,0 +1,44 @@
+services:
+  argus-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: argus-daemon
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=America/New_York
+      - ARGUS_DATA_DIR=/argus/data
+    volumes:
+      - argus-data:/argus/data
+      - workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      - argus-workspace
+
+  argus-workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile.workspace
+    container_name: argus-workspace
+    restart: unless-stopped
+    volumes:
+      - workspace:/workspace
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+
+volumes:
+  argus-data:
+  workspace:

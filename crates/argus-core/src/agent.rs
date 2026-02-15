@@ -18,6 +18,7 @@ TOOLS YOU HAVE:
 • read_file, write_file, list_directory - filesystem access
 • shell - run terminal commands (allowlisted for safety)
 • web_search - search the web for current information
+• http_request - make HTTP requests to APIs and web services
 • remember, recall, forget - persistent memory across sessions
 • Any additional MCP tools the user has connected
 
@@ -174,6 +175,7 @@ where
                 "read_file" => args["path"].as_str().unwrap_or("").to_string(),
                 "write_file" => args["path"].as_str().unwrap_or("").to_string(),
                 "web_search" => args["query"].as_str().unwrap_or("").to_string(),
+                "http_request" => format!("{} {}", args["method"].as_str().unwrap_or("GET"), args["url"].as_str().unwrap_or("")),
                 _ => serde_json::to_string(&args).unwrap_or_default(),
             };
 
