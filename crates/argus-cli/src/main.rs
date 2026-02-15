@@ -51,6 +51,9 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
+
+    /// Run in daemon mode (always-on, Telegram bot)
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -136,6 +139,31 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to get OpenRouter API key from vault: {}", e))?;
 
             telegram::run_telegram_bot(bot_token, openrouter_api_key).await;
+        }
+        Some(Commands::Daemon) => {
+            println!("🔴 Argus daemon starting...");
+
+            // Try to get Telegram token - if exists, run bot
+            match vault.retrieve("telegram_bot_token") {
+                Ok(bot_token) => {
+                    let openrouter_api_key = vault.retrieve("openrouter_api_key")
+                        .map_err(|e| anyhow::anyhow!("Daemon requires OpenRouter API key: {}", e))?;
+
+                    println!("✓ Telegram bot enabled");
+                    println!("✓ Daemon running (Ctrl+C to stop)");
+
+                    telegram::run_telegram_bot(bot_token, openrouter_api_key).await;
+                }
+                Err(_) => {
+                    println!("⚠ No telegram_bot_token in vault - daemon idle");
+                    println!("✓ Daemon running (Ctrl+C to stop)");
+
+                    // Just keep process alive with signal handling
+                    use tokio::signal;
+                    signal::ctrl_c().await?;
+                    println!("\n👋 Daemon stopped");
+                }
+            }
         }
     }
 
