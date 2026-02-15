@@ -173,14 +173,14 @@ impl App {
         // Show tool activity
         for entry in tool_log {
             self.messages.push(ChatMessage {
-                role: "Grok".to_string(),
+                role: "Argus".to_string(),
                 content: entry,
             });
         }
 
         if !response_text.is_empty() {
             self.messages.push(ChatMessage {
-                role: "Grok".to_string(),
+                role: "Argus".to_string(),
                 content: response_text,
             });
         }
