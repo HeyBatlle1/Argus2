@@ -143,22 +143,26 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Daemon) => {
             println!("🔴 Argus daemon starting...");
 
-            // Try to get Telegram token - if exists, run bot
-            match vault.retrieve("telegram_bot_token") {
-                Ok(bot_token) => {
-                    let openrouter_api_key = vault.retrieve("openrouter_api_key")
-                        .map_err(|e| anyhow::anyhow!("Daemon requires OpenRouter API key: {}", e))?;
+            // Try vault first, then fall back to env vars (for Docker)
+            let bot_token = vault.retrieve("telegram_bot_token")
+                .ok()
+                .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok());
 
+            let api_key = vault.retrieve("openrouter_api_key")
+                .ok()
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .ok_or_else(|| anyhow::anyhow!("No OpenRouter API key found in vault or OPENROUTER_API_KEY env var"))?;
+
+            match bot_token {
+                Some(token) => {
                     println!("✓ Telegram bot enabled");
                     println!("✓ Daemon running (Ctrl+C to stop)");
-
-                    telegram::run_telegram_bot(bot_token, openrouter_api_key).await;
+                    telegram::run_telegram_bot(token, api_key).await;
                 }
-                Err(_) => {
-                    println!("⚠ No telegram_bot_token in vault - daemon idle");
-                    println!("✓ Daemon running (Ctrl+C to stop)");
+                None => {
+                    println!("⚠ No telegram_bot_token in vault or TELEGRAM_BOT_TOKEN env var");
+                    println!("✓ Daemon running idle (Ctrl+C to stop)");
 
-                    // Just keep process alive with signal handling
                     use tokio::signal;
                     signal::ctrl_c().await?;
                     println!("\n👋 Daemon stopped");
