@@ -79,10 +79,14 @@ where
 {
     on_event(AgentEvent::Thinking);
 
-    // Build tool list: built-ins + MCP tools
-    let mut tool_schemas = tools::builtin_tool_schemas();
+    // Build tool list: MCP tools take precedence over builtins to avoid duplicates.
+    // Google's API rejects duplicate function names, so we deduplicate here.
+    let mut tool_schemas = Vec::new();
+    let mut registered_names = std::collections::HashSet::new();
 
+    // Add MCP tools first (they get precedence)
     for mcp_tool in mcp.all_tools() {
+        registered_names.insert(mcp_tool.name.clone());
         tool_schemas.push(serde_json::json!({
             "type": "function",
             "function": {
@@ -91,6 +95,14 @@ where
                 "parameters": mcp_tool.input_schema
             }
         }));
+    }
+
+    // Add builtins only if not already registered by an MCP tool
+    for schema in tools::builtin_tool_schemas() {
+        let name = schema["function"]["name"].as_str().unwrap_or("");
+        if !name.is_empty() && !registered_names.contains(name) {
+            tool_schemas.push(schema);
+        }
     }
 
     // Initial message list
@@ -124,6 +136,7 @@ where
         // Check for API error
         if let Some(err) = json.get("error") {
             let msg = err["message"].as_str().unwrap_or("Unknown API error");
+            eprintln!("🔴 API Error Response: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
             on_event(AgentEvent::Error(msg.to_string()));
             return Err(msg.to_string());
         }
