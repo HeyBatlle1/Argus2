@@ -5,7 +5,6 @@
 use crate::shell::{self, ShellPolicy};
 use serde_json::Value;
 
-/// All built-in tool definitions as OpenAI-compatible function schemas
 pub fn builtin_tool_schemas() -> Vec<Value> {
     serde_json::json!([
         {
@@ -83,7 +82,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "remember",
-                "description": "Store information in persistent memory. Use for facts, preferences, important details about the user.",
+                "description": "Store information in persistent memory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -104,7 +103,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "recall",
-                "description": "Search and retrieve memories. Use at the start of conversations or when you need context.",
+                "description": "Search and retrieve memories.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -161,8 +160,6 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
     ]).as_array().unwrap().clone()
 }
 
-/// Execute a built-in tool by name.
-/// MCP tools are NOT handled here — caller falls through to MCP if this returns None.
 pub async fn execute_builtin(
     name: &str,
     args: &Value,
@@ -185,7 +182,6 @@ pub async fn execute_builtin(
     }
 }
 
-/// Trait for memory backends
 pub trait MemoryBackend: Send + Sync {
     fn remember(
         &self,
@@ -241,8 +237,8 @@ fn tool_list_directory(args: &Value) -> String {
             for entry in items {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                result.push_str(&format!("{}{}\ n",
-                    if is_dir { "\u{1f4c1} " } else { "\u{1f4c4} " },
+                result.push_str(&format!("{} {}\n",
+                    if is_dir { "[DIR]" } else { "[FILE]" },
                     name
                 ));
             }
@@ -256,7 +252,7 @@ fn tool_write_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     let content = args["content"].as_str().unwrap_or("");
     match std::fs::write(path, content) {
-        Ok(_) => format!("\u2705 Written {} bytes to {}", content.len(), path),
+        Ok(_) => format!("Written {} bytes to {}", content.len(), path),
         Err(e) => format!("Error writing file: {}", e),
     }
 }
@@ -265,7 +261,7 @@ async fn tool_shell(args: &Value, policy: &ShellPolicy) -> String {
     let command = args["command"].as_str().unwrap_or("");
     match shell::execute_shell(policy, command).await {
         Ok(output) => output,
-        Err(e) => format!("\u26d4 {}", e),
+        Err(e) => format!("Shell error: {}", e),
     }
 }
 
@@ -274,15 +270,12 @@ async fn tool_web_search(args: &Value, client: &reqwest::Client, brave_key: Opti
     if query.is_empty() {
         return "No search query provided".to_string();
     }
-
     match brave_key {
         Some(key) => brave_search(query, client, key).await,
-        None => "web_search is not configured: set BRAVE_SEARCH_API_KEY in your environment or vault.".to_string(),
+        None => "web_search not configured: run 'argus vault set brave_search_api_key YOUR_KEY'".to_string(),
     }
 }
 
-/// Call the Brave Search API and return formatted results.
-/// Docs: https://api.search.brave.com/app/documentation/web-search
 async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> String {
     let url = format!(
         "https://api.search.brave.com/res/v1/web/search?q={}&count=8&text_decorations=false&result_filter=web",
@@ -305,20 +298,20 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
                 let body = r.text().await.unwrap_or_default();
                 return format!("Brave Search error {}: {}", status, body);
             }
-
             match r.json::<serde_json::Value>().await {
                 Err(e) => format!("Failed to parse Brave Search response: {}", e),
                 Ok(json) => {
                     let results = json["web"]["results"].as_array();
                     match results {
-                        None | Some([]) => format!("No results found for '{}'", query),
+                        None => format!("No results found for '{}'", query),
+                        Some(results) if results.is_empty() => format!("No results found for '{}'", query),
                         Some(results) => {
                             let mut output = format!("Search results for '{}':\n\n", query);
                             for r in results.iter().take(6) {
                                 let title = r["title"].as_str().unwrap_or("Untitled");
                                 let url   = r["url"].as_str().unwrap_or("");
                                 let desc  = r["description"].as_str().unwrap_or("");
-                                output.push_str(&format!("**{}**\n{}\n{}\n\n", title, desc, url));
+                                output.push_str(&format!("[{}]\n{}\n{}\n\n", title, desc, url));
                             }
                             output
                         }
@@ -336,7 +329,7 @@ fn tool_remember(args: &Value, memory: &dyn MemoryBackend) -> String {
     let reasoning   = args["reasoning"].as_str();
     match memory.remember(memory_type, content, reasoning, importance) {
         Ok(msg) => msg,
-        Err(e)  => format!("\u274c Memory error: {}", e),
+        Err(e)  => format!("Memory error: {}", e),
     }
 }
 
@@ -345,14 +338,14 @@ fn tool_recall(args: &Value, memory: &dyn MemoryBackend) -> String {
     let memory_type = args["type"].as_str();
     let limit       = args["limit"].as_u64().unwrap_or(10) as usize;
     match memory.recall(query, memory_type, limit) {
-        Err(e)     => format!("\u274c Recall error: {}", e),
-        Ok(mems)   => {
+        Err(e)   => format!("Recall error: {}", e),
+        Ok(mems) => {
             if mems.is_empty() {
                 "No memories found.".to_string()
             } else {
-                let mut result = String::from("\u{1f9e0} Recalled memories:\n\n");
+                let mut result = String::from("Recalled memories:\n\n");
                 for m in mems {
-                    result.push_str(&format!("\u2022 [{}] (importance: {:.1}): {}\n",
+                    result.push_str(&format!("- [{}] (importance: {:.1}): {}\n",
                         m.memory_type, m.importance, m.content));
                 }
                 result
@@ -365,7 +358,7 @@ fn tool_forget(args: &Value, memory: &dyn MemoryBackend) -> String {
     let content_match = args["content_match"].as_str().unwrap_or("");
     match memory.forget(content_match) {
         Ok(msg) => msg,
-        Err(e)  => format!("\u274c Forget error: {}", e),
+        Err(e)  => format!("Forget error: {}", e),
     }
 }
 
