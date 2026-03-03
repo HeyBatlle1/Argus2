@@ -1,12 +1,16 @@
 //! Telegram Bot for Argus
-//! Uses the shared agent loop from argus-core
+//!
+//! Uses the shared agent loop from argus-core.
+//! Maintains per-chat conversation history so Argus remembers context
+//! within a session.
 
 use teloxide::prelude::*;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 use argus_memory::sqlite::SqliteMemory;
-use argus_core::{AgentConfig, AgentEvent, ShellPolicy};
+use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy};
 
 struct ArgusBot {
     config: AgentConfig,
@@ -14,6 +18,8 @@ struct ArgusBot {
     memory: SqliteMemory,
     mcp: argus_core::mcp::McpClient,
     shell_policy: ShellPolicy,
+    /// Per-chat conversation history. Key is Telegram chat_id.
+    histories: HashMap<i64, Vec<ConversationMessage>>,
 }
 
 impl ArgusBot {
@@ -37,16 +43,21 @@ impl ArgusBot {
             memory: SqliteMemory::open_default().expect("failed to open memory db"),
             mcp,
             shell_policy,
+            histories: HashMap::new(),
         }
     }
 
-    async fn process_message(&mut self, user_msg: &str) -> String {
+    async fn process_message(&mut self, chat_id: i64, user_msg: &str) -> String {
+        let history = self.histories.entry(chat_id).or_default();
+        let history_snapshot = history.clone();
+
         let mut response_text = String::new();
         let mut tool_log = Vec::new();
 
         let result = argus_core::run_agent_turn(
             &self.config,
             user_msg,
+            &history_snapshot,
             &self.shell_policy,
             &self.memory,
             &mut self.mcp,
@@ -54,15 +65,18 @@ impl ArgusBot {
             |event| {
                 match event {
                     AgentEvent::ToolCall { name, preview } => {
-                        tool_log.push(format!("🔧 {}: {}", name, 
-                            if preview.len() > 80 { format!("{}...", &preview[..80]) } else { preview }
-                        ));
+                        let short = if preview.len() > 80 {
+                            format!("{}...", &preview[..80])
+                        } else {
+                            preview
+                        };
+                        tool_log.push(format!("\u{1f527} {}: {}", name, short));
                     }
                     AgentEvent::Response(text) => {
                         response_text = text;
                     }
                     AgentEvent::Error(err) => {
-                        response_text = format!("❌ {}", err);
+                        response_text = format!("\u274c {}", err);
                     }
                     _ => {}
                 }
@@ -75,7 +89,26 @@ impl ArgusBot {
             }
         }
 
-        // Prepend tool activity if any
+        // Update this chat's history
+        let history = self.histories.entry(chat_id).or_default();
+        history.push(ConversationMessage {
+            role: "user".to_string(),
+            content: user_msg.to_string(),
+        });
+        if !response_text.is_empty() {
+            history.push(ConversationMessage {
+                role: "assistant".to_string(),
+                content: response_text.clone(),
+            });
+        }
+
+        // Trim history to last 40 messages to avoid token overflow
+        let history = self.histories.entry(chat_id).or_default();
+        if history.len() > 40 {
+            let drain_to = history.len() - 40;
+            history.drain(0..drain_to);
+        }
+
         if !tool_log.is_empty() {
             format!("{}\n\n{}", tool_log.join("\n"), response_text)
         } else {
@@ -93,9 +126,10 @@ pub async fn run_telegram_bot(token: String, api_key: String) {
         let argus = Arc::clone(&argus);
         async move {
             if let Some(text) = msg.text() {
+                let chat_id = msg.chat.id.0;
                 let response = {
                     let mut agent = argus.lock().await;
-                    agent.process_message(text).await
+                    agent.process_message(chat_id, text).await
                 };
                 for chunk in response.chars().collect::<Vec<_>>().chunks(4000) {
                     let chunk_str: String = chunk.iter().collect();
