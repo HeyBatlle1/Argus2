@@ -1,6 +1,7 @@
 //! Argus CLI - The Hundred-Eyed Agent
 //!
-//! Main entrypoint for the Argus command-line interface.
+//! Main entrypoint. Loads credentials from the encrypted vault,
+//! then hands off to the appropriate surface (TUI, Telegram, daemon).
 
 mod telegram;
 mod tui;
@@ -9,6 +10,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use argus_crypto::{SecureVault, vault::VaultError};
+use argus_core::AgentConfig;
 
 const LOGO: &str = r#"
     ___    ____  ______  __  _______
@@ -18,7 +20,7 @@ const LOGO: &str = r#"
 /_/  |_/_/ |_|\____/  \____//____/
 
     THE HUNDRED-EYED AGENT
-    Autonomous • Encrypted • Local
+    Autonomous \u2022 Encrypted \u2022 Local
 "#;
 
 #[derive(Parser)]
@@ -34,52 +36,35 @@ struct Cli {
 enum Commands {
     /// Run interactive TUI mode
     Tui {
-        /// OpenRouter API key (or use vault)
         #[arg(short, long)]
         api_key: Option<String>,
     },
-
     /// Run Telegram bot
     Telegram {
-        /// Telegram bot token (or use vault)
         #[arg(short, long)]
         token: Option<String>,
     },
-
     /// Manage secure credential vault
     Vault {
         #[command(subcommand)]
         action: VaultAction,
     },
-
-    /// Run in daemon mode (always-on, Telegram bot)
+    /// Run in daemon mode (Telegram bot, env vars only)
     Daemon,
 }
 
 #[derive(Subcommand)]
 enum VaultAction {
     /// Store a credential
-    Set {
-        /// Credential key
-        key: String,
-        /// Credential value
-        value: String,
-    },
+    Set { key: String, value: String },
     /// Retrieve a credential
-    Get {
-        /// Credential key
-        key: String,
-    },
+    Get { key: String },
     /// List all credential keys (not values)
     List,
     /// Delete a credential
-    Delete {
-        /// Credential key
-        key: String,
-    },
+    Delete { key: String },
 }
 
-/// Get the default vault path
 fn vault_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -87,18 +72,39 @@ fn vault_path() -> PathBuf {
         .join("vault.enc")
 }
 
+/// Load AgentConfig from vault, falling back to env var for OpenRouter key.
+/// Brave Search key is optional - agent works without it, web_search just reports unconfigured.
+fn load_agent_config(vault: &SecureVault, cli_api_key: Option<String>) -> anyhow::Result<AgentConfig> {
+    let openrouter_key = if let Some(k) = cli_api_key {
+        k
+    } else {
+        vault.retrieve("openrouter_api_key")
+            .map_err(|e| anyhow::anyhow!(
+                "OpenRouter API key not found.\n\nStore it with:\n  argus vault set openrouter_api_key YOUR_KEY\n\nError: {}",
+                e
+            ))?
+    };
+
+    let mut config = AgentConfig::new(openrouter_key);
+
+    // Load Brave Search key from vault if present, else fall back to env var
+    if config.brave_search_key.is_none() {
+        if let Ok(brave_key) = vault.retrieve("brave_search_api_key") {
+            config.brave_search_key = Some(brave_key);
+        }
+    }
+
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse CLI args
     let cli = Cli::parse();
 
-    // Initialize vault only if not in daemon mode (daemon uses env vars in Docker)
     let vault_file = vault_path();
     let mut vault = if matches!(cli.command, Some(Commands::Daemon)) {
-        // Daemon mode: skip vault (uses env vars), create dummy vault
         None
     } else {
-        // Other modes: initialize vault normally
         if let Some(parent) = vault_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -116,62 +122,61 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Vault { action }) => {
             handle_vault_command(vault.as_mut().unwrap(), action)?;
         }
-        Some(Commands::Tui { api_key }) => {
+
+        Some(Commands::Tui { api_key }) | None => {
             let vault = vault.as_mut().unwrap();
-            let key = if let Some(k) = api_key {
-                k
-            } else {
-                vault.retrieve("openrouter_api_key")
-                    .map_err(|e| anyhow::anyhow!("OpenRouter API key not found. Set it with: argus vault set openrouter_api_key YOUR_KEY\nError: {}", e))?
-            };
+            let cli_key = if let Some(Commands::Tui { api_key }) = cli.command { api_key } else { None };
+            let config = load_agent_config(vault, cli_key)?;
+
+            if config.brave_search_key.is_none() {
+                eprintln!("\u26a0 Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
+            }
 
             println!("{}", LOGO);
-            tui::run_tui(key).await?;
+            tui::run_tui(config).await?;
         }
-        None => {
-            let vault = vault.as_mut().unwrap();
-            let key = vault.retrieve("openrouter_api_key")
-                .map_err(|e| anyhow::anyhow!("OpenRouter API key not found. Set it with: argus vault set openrouter_api_key YOUR_KEY\nError: {}", e))?;
 
-            println!("{}", LOGO);
-            tui::run_tui(key).await?;
-        }
         Some(Commands::Telegram { token }) => {
             let vault = vault.as_mut().unwrap();
             let bot_token = if let Some(t) = token {
                 t
             } else {
                 vault.retrieve("telegram_bot_token")
-                    .map_err(|e| anyhow::anyhow!("Failed to get telegram token from vault: {}. Use --token or store in vault with: argus vault set telegram_bot_token YOUR_TOKEN", e))?
+                    .map_err(|e| anyhow::anyhow!(
+                        "Telegram token not found. Store with: argus vault set telegram_bot_token YOUR_TOKEN\nError: {}",
+                        e
+                    ))?
             };
-
-            let openrouter_api_key = vault.retrieve("openrouter_api_key")
-                .map_err(|e| anyhow::anyhow!("Failed to get OpenRouter API key from vault: {}", e))?;
-
-            telegram::run_telegram_bot(bot_token, openrouter_api_key).await;
+            let config = load_agent_config(vault, None)?;
+            telegram::run_telegram_bot(bot_token, config).await;
         }
-        Some(Commands::Daemon) => {
-            println!("🔴 Argus daemon starting...");
 
-            // Env vars only in daemon mode (vault is None here)
-            let bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+        Some(Commands::Daemon) => {
+            println!("\u{1f534} Argus daemon starting...");
 
             let api_key = std::env::var("OPENROUTER_API_KEY")
-                .map_err(|_| anyhow::anyhow!("No OPENROUTER_API_KEY env var set"))?;
+                .map_err(|_| anyhow::anyhow!("OPENROUTER_API_KEY env var not set"))?;
 
+            let mut config = AgentConfig::new(api_key);
+
+            // Daemon: env vars only (no vault access in containerized environments)
+            if let Ok(brave_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
+                config.brave_search_key = Some(brave_key);
+            }
+
+            let bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
             match bot_token {
                 Some(token) => {
-                    println!("✓ Telegram bot enabled");
-                    println!("✓ Daemon running (Ctrl+C to stop)");
-                    telegram::run_telegram_bot(token, api_key).await;
+                    println!("\u2713 Telegram bot enabled");
+                    println!("\u2713 Daemon running (Ctrl+C to stop)");
+                    telegram::run_telegram_bot(token, config).await;
                 }
                 None => {
-                    println!("⚠ No TELEGRAM_BOT_TOKEN env var set");
-                    println!("✓ Daemon running idle (Ctrl+C to stop)");
-
+                    println!("\u26a0 No TELEGRAM_BOT_TOKEN set");
+                    println!("\u2713 Daemon running idle (Ctrl+C to stop)");
                     use tokio::signal;
                     signal::ctrl_c().await?;
-                    println!("\n👋 Daemon stopped");
+                    println!("\n\u{1f44b} Daemon stopped");
                 }
             }
         }
@@ -185,16 +190,16 @@ fn handle_vault_command(vault: &mut SecureVault, action: VaultAction) -> anyhow:
         VaultAction::Set { key, value } => {
             vault.store(&key, &value)
                 .map_err(|e| anyhow::anyhow!("Failed to store credential: {}", e))?;
-            println!("✓ Stored credential: {}", key);
+            println!("\u2713 Stored: {}", key);
         }
         VaultAction::Get { key } => {
             match vault.retrieve(&key) {
                 Ok(value) => println!("{}", value),
                 Err(VaultError::NotFound(_)) => {
-                    eprintln!("✗ Key not found: {}", key);
+                    eprintln!("\u2717 Key not found: {}", key);
                     std::process::exit(1);
                 }
-                Err(e) => return Err(anyhow::anyhow!("Failed to retrieve credential: {}", e)),
+                Err(e) => return Err(anyhow::anyhow!("Failed to retrieve: {}", e)),
             }
         }
         VaultAction::List => {
@@ -210,8 +215,8 @@ fn handle_vault_command(vault: &mut SecureVault, action: VaultAction) -> anyhow:
         }
         VaultAction::Delete { key } => {
             vault.delete(&key)
-                .map_err(|e| anyhow::anyhow!("Failed to delete credential: {}", e))?;
-            println!("✓ Deleted credential: {}", key);
+                .map_err(|e| anyhow::anyhow!("Failed to delete: {}", e))?;
+            println!("\u2713 Deleted: {}", key);
         }
     }
     Ok(())

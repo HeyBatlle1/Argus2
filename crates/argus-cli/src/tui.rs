@@ -1,8 +1,4 @@
 //! Interactive TUI for Argus
-//!
-//! Ratatui-based terminal interface. Left pane shows Argus state icon,
-//! right pane is the chat. Maintains full conversation history so Argus
-//! has context across every turn in a session.
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -21,10 +17,6 @@ use std::io;
 
 use argus_core::{AgentConfig, AgentEvent, ConversationMessage, McpClient, ShellPolicy};
 use argus_memory::SqliteMemory;
-
-// ---------------------------------------------------------------------------
-// State icons
-// ---------------------------------------------------------------------------
 
 const ARGUS_WATCHING: &str = "\
 \n\
@@ -66,10 +58,6 @@ const ARGUS_COMPLETE: &str = "\
 \n\
 COMPLETE";
 
-// ---------------------------------------------------------------------------
-// State, messages, application
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, PartialEq)]
 enum ArgusState {
     Watching,
@@ -78,16 +66,13 @@ enum ArgusState {
     Complete,
 }
 
-/// A message shown in the TUI chat pane
 struct ChatMessage {
-    role: String,   // "You" or "Argus"
+    role: String,
     content: String,
 }
 
 struct App {
-    /// UI messages (what the user sees)
     chat: Vec<ChatMessage>,
-    /// LLM conversation history (what Argus remembers)
     history: Vec<ConversationMessage>,
     input: String,
     scroll: u16,
@@ -100,7 +85,7 @@ struct App {
 }
 
 impl App {
-    fn new(api_key: String) -> Result<Self, String> {
+    fn new(config: AgentConfig) -> Result<Self, String> {
         let memory = SqliteMemory::open_default()
             .map_err(|e| format!("Failed to open memory: {}", e))?;
 
@@ -115,7 +100,7 @@ impl App {
             history: vec![],
             input: String::new(),
             scroll: 0,
-            config: AgentConfig::new(api_key),
+            config,
             client: reqwest::Client::new(),
             state: ArgusState::Watching,
             memory,
@@ -130,17 +115,13 @@ impl App {
         }
 
         let user_msg = self.input.clone();
-        self.chat.push(ChatMessage {
-            role: "You".to_string(),
-            content: user_msg.clone(),
-        });
+        self.chat.push(ChatMessage { role: "You".to_string(), content: user_msg.clone() });
         self.input.clear();
         self.state = ArgusState::Thinking;
 
         let mut response_text = String::new();
         let mut tool_log: Vec<String> = Vec::new();
 
-        // Pass full conversation history so Argus has context across turns
         let result = argus_core::run_agent_turn(
             &self.config,
             &user_msg,
@@ -152,23 +133,14 @@ impl App {
             |event| match event {
                 AgentEvent::ToolCall { name, preview } => {
                     self.state = ArgusState::Executing;
-                    let short = if preview.len() > 60 {
-                        format!("{}...", &preview[..60])
-                    } else {
-                        preview
-                    };
+                    let short = if preview.len() > 60 { format!("{}...", &preview[..60]) } else { preview };
                     tool_log.push(format!("\u{1f527} {}: {}", name, short));
                 }
-                AgentEvent::Response(text) => {
-                    response_text = text;
-                }
-                AgentEvent::Error(err) => {
-                    response_text = format!("\u274c {}", err);
-                }
+                AgentEvent::Response(text) => { response_text = text; }
+                AgentEvent::Error(err) => { response_text = format!("\u274c {}", err); }
                 _ => {}
             },
-        )
-        .await;
+        ).await;
 
         if let Err(e) = result {
             if response_text.is_empty() {
@@ -176,31 +148,16 @@ impl App {
             }
         }
 
-        // Update conversation history for next turn
-        self.history.push(ConversationMessage {
-            role: "user".to_string(),
-            content: user_msg,
-        });
+        self.history.push(ConversationMessage { role: "user".to_string(), content: user_msg });
         if !response_text.is_empty() {
-            self.history.push(ConversationMessage {
-                role: "assistant".to_string(),
-                content: response_text.clone(),
-            });
+            self.history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
         }
 
-        // Show tool activity in UI
         for entry in tool_log {
-            self.chat.push(ChatMessage {
-                role: "Argus".to_string(),
-                content: entry,
-            });
+            self.chat.push(ChatMessage { role: "Argus".to_string(), content: entry });
         }
-
         if !response_text.is_empty() {
-            self.chat.push(ChatMessage {
-                role: "Argus".to_string(),
-                content: response_text,
-            });
+            self.chat.push(ChatMessage { role: "Argus".to_string(), content: response_text });
         }
 
         self.state = ArgusState::Complete;
@@ -208,13 +165,8 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TUI entrypoint
-// ---------------------------------------------------------------------------
-
-pub async fn run_tui(api_key: String) -> anyhow::Result<()> {
-    let mut app = App::new(api_key)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+pub async fn run_tui(config: AgentConfig) -> anyhow::Result<()> {
+    let mut app = App::new(config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -226,7 +178,6 @@ pub async fn run_tui(api_key: String) -> anyhow::Result<()> {
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
     result
 }
 
@@ -244,17 +195,13 @@ async fn run_event_loop(
                 }
                 app.state = ArgusState::Watching;
                 match key.code {
-                    KeyCode::Esc        => break,
-                    KeyCode::Enter      => {
-                        if !app.input.is_empty() {
-                            app.send_message().await?;
-                        }
-                    }
-                    KeyCode::Char(c)    => app.input.push(c),
-                    KeyCode::Backspace  => { app.input.pop(); }
-                    KeyCode::Up         => app.scroll = app.scroll.saturating_sub(1),
-                    KeyCode::Down       => app.scroll = app.scroll.saturating_add(1),
-                    _                   => {}
+                    KeyCode::Esc       => break,
+                    KeyCode::Enter     => { if !app.input.is_empty() { app.send_message().await?; } }
+                    KeyCode::Char(c)   => app.input.push(c),
+                    KeyCode::Backspace => { app.input.pop(); }
+                    KeyCode::Up        => app.scroll = app.scroll.saturating_sub(1),
+                    KeyCode::Down      => app.scroll = app.scroll.saturating_add(1),
+                    _                  => {}
                 }
             }
         }
@@ -262,19 +209,11 @@ async fn run_event_loop(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
 fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22),
-            Constraint::Min(40),
-        ])
+        .constraints([Constraint::Length(22), Constraint::Min(40)])
         .split(f.size());
-
     draw_state_icon(f, app, main_chunks[0]);
     draw_chat(f, app, main_chunks[1]);
 }
@@ -286,7 +225,6 @@ fn draw_state_icon(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rec
         ArgusState::Executing => (ARGUS_EXECUTING, Color::Magenta, " Executing "),
         ArgusState::Complete  => (ARGUS_COMPLETE,  Color::Green,   " Complete "),
     };
-
     let widget = Paragraph::new(icon)
         .style(Style::default().fg(color))
         .alignment(Alignment::Center)
@@ -310,24 +248,15 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
         ])
         .split(area);
 
-    // Header
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "ARGUS",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("ARGUS", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled("The Hundred-Eyed Agent", Style::default().fg(Color::DarkGray)),
     ]))
     .alignment(Alignment::Center)
-    .block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
     f.render_widget(header, chunks[0]);
 
-    // Messages
     let mut chat_lines: Vec<Line> = vec![];
     for msg in &app.chat {
         let (color, prefix) = if msg.role == "You" {
@@ -360,14 +289,12 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
         .scroll((app.scroll, 0));
     f.render_widget(chat, chunks[1]);
 
-    // Input
     let is_busy = matches!(app.state, ArgusState::Thinking | ArgusState::Executing);
     let (input_border, input_fg, input_title) = if is_busy {
         (Color::DarkGray, Color::DarkGray, " Working... ")
     } else {
         (Color::Cyan, Color::White, " Message ")
     };
-
     let input = Paragraph::new(app.input.as_str())
         .style(Style::default().fg(input_fg))
         .block(
@@ -381,7 +308,6 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
         );
     f.render_widget(input, chunks[2]);
 
-    // Status bar
     let mcp_count = app.mcp.servers.len();
     let mcp_tools: usize = app.mcp.servers.iter().map(|s| s.tools.len()).sum();
     let mcp_status = if mcp_count > 0 {
@@ -389,21 +315,19 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         String::new()
     };
-
     let model_short = app.config.model.rsplit('/').next().unwrap_or(&app.config.model);
-    let history_len = app.history.len() / 2; // pairs of user/assistant
+    let history_len = app.history.len() / 2;
+    let brave_indicator = if app.config.brave_search_key.is_some() { "\u{1f50d}" } else { "\u{1f50d}\u26a0" };
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" ESC", Style::default().fg(Color::Yellow)),
         Span::styled(" quit ", Style::default().fg(Color::DarkGray)),
         Span::styled("ENTER", Style::default().fg(Color::Yellow)),
-        Span::styled(" send ", Style::default().fg(Color::DarkGray)),
-        Span::styled("\u2191\u2193", Style::default().fg(Color::Yellow)),
-        Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
-        Span::styled("| ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" send  ", Style::default().fg(Color::DarkGray)),
         Span::styled(&mcp_status, Style::default().fg(Color::Blue)),
-        Span::styled("| ", Style::default().fg(Color::DarkGray)),
         Span::styled(model_short, Style::default().fg(Color::Magenta)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(brave_indicator, Style::default().fg(Color::DarkGray)),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} turns", history_len), Style::default().fg(Color::DarkGray)),
     ]));

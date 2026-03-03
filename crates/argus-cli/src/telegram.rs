@@ -1,8 +1,4 @@
 //! Telegram Bot for Argus
-//!
-//! Uses the shared agent loop from argus-core.
-//! Maintains per-chat conversation history so Argus remembers context
-//! within a session.
 
 use teloxide::prelude::*;
 use std::sync::Arc;
@@ -18,12 +14,11 @@ struct ArgusBot {
     memory: SqliteMemory,
     mcp: argus_core::mcp::McpClient,
     shell_policy: ShellPolicy,
-    /// Per-chat conversation history. Key is Telegram chat_id.
     histories: HashMap<i64, Vec<ConversationMessage>>,
 }
 
 impl ArgusBot {
-    fn new(api_key: String) -> Self {
+    fn new(config: AgentConfig) -> Self {
         let mut mcp = argus_core::mcp::McpClient::new();
         let _ = mcp.connect_all();
 
@@ -38,7 +33,7 @@ impl ArgusBot {
         }
 
         Self {
-            config: AgentConfig::new(api_key),
+            config,
             client: reqwest::Client::new(),
             memory: SqliteMemory::open_default().expect("failed to open memory db"),
             mcp,
@@ -48,8 +43,7 @@ impl ArgusBot {
     }
 
     async fn process_message(&mut self, chat_id: i64, user_msg: &str) -> String {
-        let history = self.histories.entry(chat_id).or_default();
-        let history_snapshot = history.clone();
+        let history_snapshot = self.histories.entry(chat_id).or_default().clone();
 
         let mut response_text = String::new();
         let mut tool_log = Vec::new();
@@ -62,24 +56,14 @@ impl ArgusBot {
             &self.memory,
             &mut self.mcp,
             &self.client,
-            |event| {
-                match event {
-                    AgentEvent::ToolCall { name, preview } => {
-                        let short = if preview.len() > 80 {
-                            format!("{}...", &preview[..80])
-                        } else {
-                            preview
-                        };
-                        tool_log.push(format!("\u{1f527} {}: {}", name, short));
-                    }
-                    AgentEvent::Response(text) => {
-                        response_text = text;
-                    }
-                    AgentEvent::Error(err) => {
-                        response_text = format!("\u274c {}", err);
-                    }
-                    _ => {}
+            |event| match event {
+                AgentEvent::ToolCall { name, preview } => {
+                    let short = if preview.len() > 80 { format!("{}...", &preview[..80]) } else { preview };
+                    tool_log.push(format!("\u{1f527} {}: {}", name, short));
                 }
+                AgentEvent::Response(text) => { response_text = text; }
+                AgentEvent::Error(err) => { response_text = format!("\u274c {}", err); }
+                _ => {}
             },
         ).await;
 
@@ -89,21 +73,12 @@ impl ArgusBot {
             }
         }
 
-        // Update this chat's history
         let history = self.histories.entry(chat_id).or_default();
-        history.push(ConversationMessage {
-            role: "user".to_string(),
-            content: user_msg.to_string(),
-        });
+        history.push(ConversationMessage { role: "user".to_string(), content: user_msg.to_string() });
         if !response_text.is_empty() {
-            history.push(ConversationMessage {
-                role: "assistant".to_string(),
-                content: response_text.clone(),
-            });
+            history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
         }
-
-        // Trim history to last 40 messages to avoid token overflow
-        let history = self.histories.entry(chat_id).or_default();
+        // Keep last 40 messages to stay under token limits
         if history.len() > 40 {
             let drain_to = history.len() - 40;
             history.drain(0..drain_to);
@@ -117,10 +92,10 @@ impl ArgusBot {
     }
 }
 
-pub async fn run_telegram_bot(token: String, api_key: String) {
+pub async fn run_telegram_bot(token: String, config: AgentConfig) {
     println!("Argus Telegram bot starting...");
     let bot = Bot::new(token);
-    let argus = Arc::new(Mutex::new(ArgusBot::new(api_key)));
+    let argus = Arc::new(Mutex::new(ArgusBot::new(config)));
 
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let argus = Arc::clone(&argus);
