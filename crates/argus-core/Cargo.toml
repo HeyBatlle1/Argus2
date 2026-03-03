@@ -12,3 +12,4 @@ anyhow.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 urlencoding = "2.1"
 dirs = "5.0"
+chrono = { version = "0.4", features = ["clock"] }
