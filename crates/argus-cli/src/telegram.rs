@@ -59,10 +59,10 @@ impl ArgusBot {
             |event| match event {
                 AgentEvent::ToolCall { name, preview } => {
                     let short = if preview.len() > 80 { format!("{}...", &preview[..80]) } else { preview };
-                    tool_log.push(format!("\u{1f527} {}: {}", name, short));
+                    tool_log.push(format!("[tool] {}: {}", name, short));
                 }
                 AgentEvent::Response(text) => { response_text = text; }
-                AgentEvent::Error(err) => { response_text = format!("\u274c {}", err); }
+                AgentEvent::Error(err) => { response_text = format!("[error] {}", err); }
                 _ => {}
             },
         ).await;
@@ -78,7 +78,6 @@ impl ArgusBot {
         if !response_text.is_empty() {
             history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
         }
-        // Keep last 40 messages to stay under token limits
         if history.len() > 40 {
             let drain_to = history.len() - 40;
             history.drain(0..drain_to);

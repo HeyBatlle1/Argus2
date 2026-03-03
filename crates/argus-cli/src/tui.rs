@@ -18,44 +18,44 @@ use std::io;
 use argus_core::{AgentConfig, AgentEvent, ConversationMessage, McpClient, ShellPolicy};
 use argus_memory::SqliteMemory;
 
-const ARGUS_WATCHING: &str = "\
-\n\
-\u25c9\n\
-\u25c9 \u25c9 \u25c9\n\
-\u25c9 \u25c9 \u25c9 \u25c9 \u25c9\n\
-\u25c9 \u25c9 \u25c9\n\
-\u25c9\n\
-\n\
+const ARGUS_WATCHING: &str = "
+
+  o
+ o o o
+o o o o o
+ o o o
+  o
+
 ALL EYES OPEN";
 
-const ARGUS_THINKING: &str = "\
-\n\
-\u25ce\n\
-\u25ce \u25ce \u25ce\n\
-\u25ce \u25ce \u25ce \u25ce \u25ce\n\
-\u25ce \u25ce \u25ce\n\
-\u25ce\n\
-\n\
+const ARGUS_THINKING: &str = "
+
+  @
+ @ @ @
+@ @ @ @ @
+ @ @ @
+  @
+
 THINKING...";
 
-const ARGUS_EXECUTING: &str = "\
-\n\
-\u2299\n\
-\u2299 \u2299 \u2299\n\
-\u2299 \u2299 \u26a1 \u2299 \u2299\n\
-\u2299 \u2299 \u2299\n\
-\u2299\n\
-\n\
+const ARGUS_EXECUTING: &str = "
+
+  *
+ * * *
+* * ! * *
+ * * *
+  *
+
 EXECUTING";
 
-const ARGUS_COMPLETE: &str = "\
-\n\
-\u2726\n\
-\u2726 \u2726 \u2726\n\
-\u2726 \u2726 \u2713 \u2726 \u2726\n\
-\u2726 \u2726 \u2726\n\
-\u2726\n\
-\n\
+const ARGUS_COMPLETE: &str = "
+
+  *
+ * * *
+* * + * *
+ * * *
+  *
+
 COMPLETE";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -134,10 +134,10 @@ impl App {
                 AgentEvent::ToolCall { name, preview } => {
                     self.state = ArgusState::Executing;
                     let short = if preview.len() > 60 { format!("{}...", &preview[..60]) } else { preview };
-                    tool_log.push(format!("\u{1f527} {}: {}", name, short));
+                    tool_log.push(format!("[tool] {}: {}", name, short));
                 }
                 AgentEvent::Response(text) => { response_text = text; }
-                AgentEvent::Error(err) => { response_text = format!("\u274c {}", err); }
+                AgentEvent::Error(err) => { response_text = format!("[error] {}", err); }
                 _ => {}
             },
         ).await;
@@ -260,9 +260,9 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     let mut chat_lines: Vec<Line> = vec![];
     for msg in &app.chat {
         let (color, prefix) = if msg.role == "You" {
-            (Color::Green, "\u25ba ")
+            (Color::Green, "> ")
         } else {
-            (Color::Cyan, "\u25c9 ")
+            (Color::Cyan, "o ")
         };
         chat_lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(color)),
@@ -317,7 +317,7 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     };
     let model_short = app.config.model.rsplit('/').next().unwrap_or(&app.config.model);
     let history_len = app.history.len() / 2;
-    let brave_indicator = if app.config.brave_search_key.is_some() { "\u{1f50d}" } else { "\u{1f50d}\u26a0" };
+    let brave_status = if app.config.brave_search_key.is_some() { "[search:ok]" } else { "[search:off]" };
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" ESC", Style::default().fg(Color::Yellow)),
@@ -327,7 +327,9 @@ fn draw_chat(f: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
         Span::styled(&mcp_status, Style::default().fg(Color::Blue)),
         Span::styled(model_short, Style::default().fg(Color::Magenta)),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-        Span::styled(brave_indicator, Style::default().fg(Color::DarkGray)),
+        Span::styled(brave_status, Style::default().fg(
+            if app.config.brave_search_key.is_some() { Color::Green } else { Color::Red }
+        )),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} turns", history_len), Style::default().fg(Color::DarkGray)),
     ]));
