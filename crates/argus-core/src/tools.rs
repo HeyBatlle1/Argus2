@@ -1,7 +1,6 @@
 //! Tool definitions and execution
 //!
-//! All built-in tools live here. The TUI, Telegram, and any future
-//! frontends share the same tool implementations.
+//! All built-in tools live here. Shared across TUI, Telegram, and any future frontends.
 
 use crate::shell::{self, ShellPolicy};
 use serde_json::Value;
@@ -56,7 +55,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "shell",
-                "description": "Execute a shell command and return output. Runs under an allowlist policy - only approved commands are permitted.",
+                "description": "Execute a shell command and return output. Runs under an allowlist policy.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -70,7 +69,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for current information, news, facts, or anything you don't know.",
+                "description": "Search the web for current information, news, facts, or anything you don't know. Uses Brave Search API.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -138,7 +137,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "http_request",
-                "description": "Make an HTTP request to a URL. Supports GET, POST, PUT, DELETE methods. Useful for calling APIs, fetching web pages, or interacting with web services.",
+                "description": "Make an HTTP request to a URL. Supports GET, POST, PUT, DELETE.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -162,32 +161,31 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
     ]).as_array().unwrap().clone()
 }
 
-/// Execute a built-in tool by name
-///
-/// Memory tools delegate to the provided MemoryBackend.
-/// MCP tools are NOT handled here - the caller should check MCP after this returns None.
+/// Execute a built-in tool by name.
+/// MCP tools are NOT handled here — caller falls through to MCP if this returns None.
 pub async fn execute_builtin(
     name: &str,
     args: &Value,
     shell_policy: &ShellPolicy,
     memory: &dyn MemoryBackend,
     http_client: &reqwest::Client,
+    brave_search_key: Option<&str>,
 ) -> Option<String> {
     match name {
-        "read_file" => Some(tool_read_file(args)),
+        "read_file"      => Some(tool_read_file(args)),
         "list_directory" => Some(tool_list_directory(args)),
-        "write_file" => Some(tool_write_file(args)),
-        "shell" => Some(tool_shell(args, shell_policy).await),
-        "web_search" => Some(tool_web_search(args, http_client).await),
-        "remember" => Some(tool_remember(args, memory)),
-        "recall" => Some(tool_recall(args, memory)),
-        "forget" => Some(tool_forget(args, memory)),
-        "http_request" => Some(tool_http_request(args, http_client).await),
-        _ => None, // Not a built-in - caller should try MCP
+        "write_file"     => Some(tool_write_file(args)),
+        "shell"          => Some(tool_shell(args, shell_policy).await),
+        "web_search"     => Some(tool_web_search(args, http_client, brave_search_key).await),
+        "remember"       => Some(tool_remember(args, memory)),
+        "recall"         => Some(tool_recall(args, memory)),
+        "forget"         => Some(tool_forget(args, memory)),
+        "http_request"   => Some(tool_http_request(args, http_client).await),
+        _                => None,
     }
 }
 
-/// Trait for memory backends so tools don't care about implementation
+/// Trait for memory backends
 pub trait MemoryBackend: Send + Sync {
     fn remember(
         &self,
@@ -207,7 +205,6 @@ pub trait MemoryBackend: Send + Sync {
     fn forget(&self, content_match: &str) -> Result<String, String>;
 }
 
-/// A memory record returned from recall
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryRecord {
     pub memory_type: String,
@@ -216,18 +213,16 @@ pub struct MemoryRecord {
     pub created_at: Option<String>,
 }
 
-// --- Tool implementations ---
+// ---------------------------------------------------------------------------
+// Tool implementations
+// ---------------------------------------------------------------------------
 
 fn tool_read_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     match std::fs::read_to_string(path) {
         Ok(content) => {
             if content.len() > 8000 {
-                format!(
-                    "{}...\n[truncated, {} bytes total]",
-                    &content[..8000],
-                    content.len()
-                )
+                format!("{}...\n[truncated, {} bytes total]", &content[..8000], content.len())
             } else {
                 content
             }
@@ -240,23 +235,18 @@ fn tool_list_directory(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or(".");
     match std::fs::read_dir(path) {
         Ok(entries) => {
-            let mut result = String::new();
             let mut items: Vec<_> = entries.flatten().collect();
             items.sort_by_key(|e| e.file_name());
+            let mut result = String::new();
             for entry in items {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                result.push_str(&format!(
-                    "{}{}\n",
-                    if is_dir { "📁 " } else { "📄 " },
+                result.push_str(&format!("{}{}\ n",
+                    if is_dir { "\u{1f4c1} " } else { "\u{1f4c4} " },
                     name
                 ));
             }
-            if result.is_empty() {
-                "(empty directory)".to_string()
-            } else {
-                result
-            }
+            if result.is_empty() { "(empty directory)".to_string() } else { result }
         }
         Err(e) => format!("Error listing directory: {}", e),
     }
@@ -266,7 +256,7 @@ fn tool_write_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     let content = args["content"].as_str().unwrap_or("");
     match std::fs::write(path, content) {
-        Ok(_) => format!("✅ Written {} bytes to {}", content.len(), path),
+        Ok(_) => format!("\u2705 Written {} bytes to {}", content.len(), path),
         Err(e) => format!("Error writing file: {}", e),
     }
 }
@@ -275,139 +265,99 @@ async fn tool_shell(args: &Value, policy: &ShellPolicy) -> String {
     let command = args["command"].as_str().unwrap_or("");
     match shell::execute_shell(policy, command).await {
         Ok(output) => output,
-        Err(e) => format!("⛔ {}", e),
+        Err(e) => format!("\u26d4 {}", e),
     }
 }
 
-async fn tool_web_search(args: &Value, client: &reqwest::Client) -> String {
+async fn tool_web_search(args: &Value, client: &reqwest::Client, brave_key: Option<&str>) -> String {
     let query = args["query"].as_str().unwrap_or("");
     if query.is_empty() {
         return "No search query provided".to_string();
     }
 
-    // Use DuckDuckGo HTML endpoint - no API key needed, no scraping Google
+    match brave_key {
+        Some(key) => brave_search(query, client, key).await,
+        None => "web_search is not configured: set BRAVE_SEARCH_API_KEY in your environment or vault.".to_string(),
+    }
+}
+
+/// Call the Brave Search API and return formatted results.
+/// Docs: https://api.search.brave.com/app/documentation/web-search
+async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> String {
     let url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
+        "https://api.search.brave.com/res/v1/web/search?q={}&count=8&text_decorations=false&result_filter=web",
         urlencoding::encode(query)
     );
 
     let resp = client
         .get(&url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        )
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "gzip")
+        .header("X-Subscription-Token", api_key)
         .send()
         .await;
 
     match resp {
-        Ok(r) => match r.text().await {
-            Ok(html) => {
-                let mut results = Vec::new();
-                // Parse DuckDuckGo result snippets
-                for (i, chunk) in html.split("result__snippet").enumerate() {
-                    if i == 0 || results.len() >= 6 {
-                        continue;
-                    }
-                    if let Some(start) = chunk.find('>') {
-                        if let Some(end) = chunk[start..].find('<') {
-                            let snippet = &chunk[start + 1..start + end];
-                            let clean: String = snippet
-                                .replace("&quot;", "\"")
-                                .replace("&amp;", "&")
-                                .replace("&lt;", "<")
-                                .replace("&gt;", ">")
-                                .replace("&#39;", "'")
-                                .replace("<b>", "")
-                                .replace("</b>", "")
-                                .chars()
-                                .filter(|c| !c.is_control())
-                                .collect();
-                            let trimmed = clean.trim();
-                            if trimmed.len() > 20 {
-                                results.push(format!("• {}", trimmed));
-                            }
-                        }
-                    }
-                }
+        Err(e) => format!("Brave Search request failed: {}", e),
+        Ok(r) => {
+            let status = r.status();
+            if !status.is_success() {
+                let body = r.text().await.unwrap_or_default();
+                return format!("Brave Search error {}: {}", status, body);
+            }
 
-                // Also try to extract result titles/URLs
-                let mut titles = Vec::new();
-                for (i, chunk) in html.split("result__a").enumerate() {
-                    if i == 0 || titles.len() >= 6 {
-                        continue;
-                    }
-                    if let Some(href_start) = chunk.find("href=\"") {
-                        let after = &chunk[href_start + 6..];
-                        if let Some(href_end) = after.find('"') {
-                            let href = &after[..href_end];
-                            // DuckDuckGo wraps URLs in redirect
-                            if let Some(url_start) = href.find("uddg=") {
-                                let raw = &href[url_start + 5..];
-                                if let Some(url_end) = raw.find('&') {
-                                    let decoded = urlencoding::decode(&raw[..url_end])
-                                        .unwrap_or_default()
-                                        .to_string();
-                                    titles.push(decoded);
-                                }
+            match r.json::<serde_json::Value>().await {
+                Err(e) => format!("Failed to parse Brave Search response: {}", e),
+                Ok(json) => {
+                    let results = json["web"]["results"].as_array();
+                    match results {
+                        None | Some([]) => format!("No results found for '{}'", query),
+                        Some(results) => {
+                            let mut output = format!("Search results for '{}':\n\n", query);
+                            for r in results.iter().take(6) {
+                                let title = r["title"].as_str().unwrap_or("Untitled");
+                                let url   = r["url"].as_str().unwrap_or("");
+                                let desc  = r["description"].as_str().unwrap_or("");
+                                output.push_str(&format!("**{}**\n{}\n{}\n\n", title, desc, url));
                             }
+                            output
                         }
                     }
-                }
-
-                if results.is_empty() {
-                    "No results found - try rephrasing your search".to_string()
-                } else {
-                    let mut output = format!("🔍 Search results for '{}':\n\n", query);
-                    for (i, result) in results.iter().enumerate() {
-                        output.push_str(result);
-                        if let Some(url) = titles.get(i) {
-                            output.push_str(&format!("\n  ({})", url));
-                        }
-                        output.push_str("\n\n");
-                    }
-                    output
                 }
             }
-            Err(e) => format!("Error reading response: {}", e),
-        },
-        Err(e) => format!("Error searching: {}", e),
+        }
     }
 }
 
 fn tool_remember(args: &Value, memory: &dyn MemoryBackend) -> String {
-    let content = args["content"].as_str().unwrap_or("");
+    let content     = args["content"].as_str().unwrap_or("");
     let memory_type = args["type"].as_str().unwrap_or("fact");
-    let importance = args["importance"].as_f64().unwrap_or(5.0);
-    let reasoning = args["reasoning"].as_str();
-
+    let importance  = args["importance"].as_f64().unwrap_or(5.0);
+    let reasoning   = args["reasoning"].as_str();
     match memory.remember(memory_type, content, reasoning, importance) {
         Ok(msg) => msg,
-        Err(e) => format!("❌ Memory error: {}", e),
+        Err(e)  => format!("\u274c Memory error: {}", e),
     }
 }
 
 fn tool_recall(args: &Value, memory: &dyn MemoryBackend) -> String {
-    let query = args["query"].as_str();
+    let query       = args["query"].as_str();
     let memory_type = args["type"].as_str();
-    let limit = args["limit"].as_u64().unwrap_or(10) as usize;
-
+    let limit       = args["limit"].as_u64().unwrap_or(10) as usize;
     match memory.recall(query, memory_type, limit) {
-        Ok(memories) => {
-            if memories.is_empty() {
+        Err(e)     => format!("\u274c Recall error: {}", e),
+        Ok(mems)   => {
+            if mems.is_empty() {
                 "No memories found.".to_string()
             } else {
-                let mut result = String::from("🧠 Recalled memories:\n\n");
-                for m in memories {
-                    result.push_str(&format!(
-                        "• [{}] (importance: {:.1}): {}\n",
-                        m.memory_type, m.importance, m.content
-                    ));
+                let mut result = String::from("\u{1f9e0} Recalled memories:\n\n");
+                for m in mems {
+                    result.push_str(&format!("\u2022 [{}] (importance: {:.1}): {}\n",
+                        m.memory_type, m.importance, m.content));
                 }
                 result
             }
         }
-        Err(e) => format!("❌ Recall error: {}", e),
     }
 }
 
@@ -415,26 +365,22 @@ fn tool_forget(args: &Value, memory: &dyn MemoryBackend) -> String {
     let content_match = args["content_match"].as_str().unwrap_or("");
     match memory.forget(content_match) {
         Ok(msg) => msg,
-        Err(e) => format!("❌ Forget error: {}", e),
+        Err(e)  => format!("\u274c Forget error: {}", e),
     }
 }
 
 async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
     let url = args["url"].as_str().unwrap_or("");
-    if url.is_empty() {
-        return "No URL provided".to_string();
-    }
+    if url.is_empty() { return "No URL provided".to_string(); }
 
     let method = args["method"].as_str().unwrap_or("GET");
-
     let mut builder = match method {
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
+        "POST"   => client.post(url),
+        "PUT"    => client.put(url),
         "DELETE" => client.delete(url),
-        _ => client.get(url),
+        _        => client.get(url),
     };
 
-    // Add custom headers
     if let Some(headers) = args["headers"].as_object() {
         for (key, val) in headers {
             if let Some(v) = val.as_str() {
@@ -443,27 +389,25 @@ async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
         }
     }
 
-    // Add body for POST/PUT
     if let Some(body) = args["body"].as_str() {
         builder = builder.body(body.to_string());
     }
 
     match builder.send().await {
+        Err(e) => format!("HTTP request failed: {}", e),
         Ok(resp) => {
-            let status = resp.status().as_u16();
-            let status_text = resp.status().to_string();
+            let status = resp.status();
             match resp.text().await {
+                Err(e) => format!("HTTP {} (body read error: {})", status, e),
                 Ok(body) => {
                     let truncated = if body.len() > 8000 {
                         format!("{}...\n[truncated, {} bytes total]", &body[..8000], body.len())
                     } else {
                         body
                     };
-                    format!("HTTP {} {}\n\n{}", status, status_text, truncated)
+                    format!("HTTP {}\n\n{}", status, truncated)
                 }
-                Err(e) => format!("HTTP {} {} (body read error: {})", status, status_text, e),
             }
         }
-        Err(e) => format!("HTTP request failed: {}", e),
     }
 }

@@ -1,21 +1,15 @@
 //! Agent orchestration loop
-//!
-//! Handles the LLM ↔ tool execution cycle. Frontends (TUI, Telegram, etc.)
-//! provide a callback for status updates; the agent loop handles the rest.
 
 use crate::mcp::McpClient;
 use crate::shell::ShellPolicy;
 use crate::tools::{self, MemoryBackend};
 use serde_json::Value;
 
-/// Maximum tool call iterations before we force a text response
 const MAX_TOOL_ROUNDS: usize = 10;
 
-/// The core identity prompt. This is who Argus is — not a costume, not a persona.
-/// The model powering the response changes; this does not.
 const SYSTEM_PROMPT: &str = r#"You are Argus — the hundred-eyed watchman.
 
-You are a local AI agent running on the user's machine. You are not affiliated with any AI company. 
+You are a local AI agent running on the user's machine. You are not affiliated with any AI company.
 You are Argus. The model generating your responses is your brain — not your identity.
 
 You have real tools. Use them. Don't describe what you would do — do it.
@@ -23,7 +17,7 @@ You have real tools. Use them. Don't describe what you would do — do it.
 TOOLS:
 • read_file, write_file, list_directory — real filesystem access
 • shell — execute terminal commands (safety policy enforced)
-• web_search — current information from the web
+• web_search — current information from the web via Brave Search
 • http_request — call any API or web endpoint
 • remember, recall, forget — persistent memory across sessions
 • Any MCP tools the user has connected
@@ -43,54 +37,49 @@ ON IDENTITY:
 
 The hundred eyes are open. What needs doing?"#;
 
-/// Events emitted during agent execution for UI updates
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// Agent is thinking (waiting for LLM)
     Thinking,
-    /// A tool is being executed
     ToolCall { name: String, preview: String },
-    /// Tool execution completed
     ToolResult { name: String, preview: String },
-    /// Final text response from the agent
     Response(String),
-    /// Error occurred
     Error(String),
 }
 
-/// A single message in the conversation history
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
 }
 
-/// Configuration for the agent
 pub struct AgentConfig {
     pub api_key: String,
     pub model: String,
     pub api_url: String,
     pub temperature: f64,
+    /// Brave Search API key for web_search tool
+    pub brave_search_key: Option<String>,
 }
 
 impl AgentConfig {
     pub fn new(api_key: String) -> Self {
+        // Pick up Brave key from environment if present
+        let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
             model: "google/gemini-2.5-flash-preview".to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
+            brave_search_key,
         }
+    }
+
+    pub fn with_brave_key(mut self, key: impl Into<String>) -> Self {
+        self.brave_search_key = Some(key.into());
+        self
     }
 }
 
-/// Run the agent loop for a single user message.
-///
-/// Pass in conversation history so the model has context across turns.
-/// The history is NOT mutated here — callers own their history and append
-/// the returned messages themselves. This keeps the agent loop pure.
-///
-/// Returns events via the callback as they happen.
 pub async fn run_agent_turn<F>(
     config: &AgentConfig,
     user_message: &str,
@@ -106,12 +95,9 @@ where
 {
     on_event(AgentEvent::Thinking);
 
-    // Build tool list: MCP tools take precedence over builtins to avoid duplicates.
-    // Some providers reject duplicate function names, so we deduplicate here.
     let mut tool_schemas = Vec::new();
     let mut registered_names = std::collections::HashSet::new();
 
-    // MCP tools first — they get precedence
     for mcp_tool in mcp.all_tools() {
         registered_names.insert(mcp_tool.name.clone());
         tool_schemas.push(serde_json::json!({
@@ -124,7 +110,6 @@ where
         }));
     }
 
-    // Builtins only if not already registered by MCP
     for schema in tools::builtin_tool_schemas() {
         let name = schema["function"]["name"].as_str().unwrap_or("");
         if !name.is_empty() && !registered_names.contains(name) {
@@ -132,23 +117,14 @@ where
         }
     }
 
-    // Build message list: system + conversation history + current user message
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
     ];
-
-    // Inject conversation history
     for msg in history {
-        messages.push(serde_json::json!({
-            "role": msg.role,
-            "content": msg.content
-        }));
+        messages.push(serde_json::json!({"role": msg.role, "content": msg.content}));
     }
-
-    // Current user message
     messages.push(serde_json::json!({"role": "user", "content": user_message}));
 
-    // Tool loop: keep going until the model gives a text response or we hit max rounds
     for _round in 0..MAX_TOOL_ROUNDS {
         let resp = http_client
             .post(&config.api_url)
@@ -170,7 +146,6 @@ where
             .await
             .map_err(|e| format!("Failed to parse API response: {}", e))?;
 
-        // Surface API errors clearly
         if let Some(err) = json.get("error") {
             let msg = err["message"].as_str().unwrap_or("Unknown API error");
             eprintln!("API Error: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
@@ -180,7 +155,6 @@ where
 
         let message = &json["choices"][0]["message"];
 
-        // No tool calls — we have a final text response
         let tool_calls = match message.get("tool_calls").and_then(|tc| tc.as_array()) {
             Some(calls) if !calls.is_empty() => calls.clone(),
             _ => {
@@ -193,10 +167,8 @@ where
             }
         };
 
-        // Add the assistant message (with tool_calls) to conversation
         messages.push(message.clone());
 
-        // Execute each tool call
         for tool_call in &tool_calls {
             let name = tool_call["function"]["name"].as_str().unwrap_or("");
             let tool_call_id = tool_call["id"].as_str().unwrap_or("");
@@ -206,25 +178,21 @@ where
                 .unwrap_or(serde_json::json!({}));
 
             let preview = match name {
-                "shell"         => args["command"].as_str().unwrap_or("").to_string(),
-                "read_file"     => args["path"].as_str().unwrap_or("").to_string(),
-                "write_file"    => args["path"].as_str().unwrap_or("").to_string(),
-                "web_search"    => args["query"].as_str().unwrap_or("").to_string(),
-                "http_request"  => format!("{} {}",
+                "shell"        => args["command"].as_str().unwrap_or("").to_string(),
+                "read_file"    => args["path"].as_str().unwrap_or("").to_string(),
+                "write_file"   => args["path"].as_str().unwrap_or("").to_string(),
+                "web_search"   => args["query"].as_str().unwrap_or("").to_string(),
+                "http_request" => format!("{} {}",
                     args["method"].as_str().unwrap_or("GET"),
                     args["url"].as_str().unwrap_or("")
                 ),
-                _               => serde_json::to_string(&args).unwrap_or_default(),
+                _              => serde_json::to_string(&args).unwrap_or_default(),
             };
 
-            on_event(AgentEvent::ToolCall {
-                name: name.to_string(),
-                preview: preview.clone(),
-            });
+            on_event(AgentEvent::ToolCall { name: name.to_string(), preview: preview.clone() });
 
-            // Try builtins first, then MCP
             let result = if let Some(output) =
-                tools::execute_builtin(name, &args, shell_policy, memory, http_client).await
+                tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref()).await
             {
                 output
             } else {
@@ -240,10 +208,7 @@ where
                 result.clone()
             };
 
-            on_event(AgentEvent::ToolResult {
-                name: name.to_string(),
-                preview: result_preview,
-            });
+            on_event(AgentEvent::ToolResult { name: name.to_string(), preview: result_preview });
 
             messages.push(serde_json::json!({
                 "role": "tool",
@@ -253,8 +218,7 @@ where
         }
     }
 
-    // Exhausted max tool rounds
-    let content = "Reached the tool call limit for this turn. Here's what I found based on results above.".to_string();
+    let content = "Reached the tool call limit for this turn.".to_string();
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
 }
