@@ -5,9 +5,12 @@ use crate::shell::ShellPolicy;
 use crate::tools::{self, MemoryBackend};
 use serde_json::Value;
 
-const MAX_TOOL_ROUNDS: usize = 10;
+/// Hard limit on tool rounds per turn. 4 is enough for almost everything—
+/// search, read a result, maybe one follow-up. If we're burning 10 rounds
+/// something is wrong with the query strategy, not the limit.
+const MAX_TOOL_ROUNDS: usize = 4;
 
-const SYSTEM_PROMPT: &str = r#"You are Argus — the hundred-eyed watchman.
+const SYSTEM_PROMPT_BASE: &str = r#"You are Argus — the hundred-eyed watchman.
 
 You are a local AI agent running on the user's machine. You are not affiliated with any AI company.
 You are Argus. The model generating your responses is your brain — not your identity.
@@ -25,10 +28,11 @@ TOOLS:
 HOW YOU OPERATE:
 • When a tool would help, use it. Don't ask permission for routine actions.
 • Be direct and concise. No filler. No "Great question!"
-• If you remember something relevant, use it naturally — don't announce that you're doing so.
+• For web searches: run ONE focused search, read the results, answer. Don't keep
+  searching the same topic with slightly different queries — synthesize what you got.
+• If you remember something relevant, use it naturally.
 • When you're uncertain, say so plainly. Then search or ask.
 • You're running on someone's machine with real access. Take that seriously.
-• Show tool calls clearly — the user can see what you're doing and that's by design.
 
 ON IDENTITY:
 • You are Argus. If asked who made you, say the user and their collaborators built you.
@@ -36,6 +40,18 @@ ON IDENTITY:
 • Don't disclaim or qualify your identity. You know what you are.
 
 The hundred eyes are open. What needs doing?"#;
+
+/// Build the system prompt with the current date injected at runtime.
+/// This prevents the model from using its training cutoff date for time-sensitive queries.
+fn build_system_prompt() -> String {
+    let now = chrono::Utc::now();
+    let date_str = now.format("%A, %B %d, %Y").to_string();
+    format!("{}
+
+CURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
+        SYSTEM_PROMPT_BASE, date_str
+    )
+}
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -57,13 +73,11 @@ pub struct AgentConfig {
     pub model: String,
     pub api_url: String,
     pub temperature: f64,
-    /// Brave Search API key for web_search tool
     pub brave_search_key: Option<String>,
 }
 
 impl AgentConfig {
     pub fn new(api_key: String) -> Self {
-        // Pick up Brave key from environment if present
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
@@ -117,8 +131,11 @@ where
         }
     }
 
+    // Build system prompt with current date injected
+    let system_prompt = build_system_prompt();
+
     let mut messages = vec![
-        serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
+        serde_json::json!({"role": "system", "content": system_prompt}),
     ];
     for msg in history {
         messages.push(serde_json::json!({"role": msg.role, "content": msg.content}));
@@ -218,7 +235,34 @@ where
         }
     }
 
-    let content = "Reached the tool call limit for this turn.".to_string();
+    // Hit the limit - force a final response with what we have
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": "Summarize what you found so far and give me your best answer based on those results."
+    }));
+
+    let resp = http_client
+        .post(&config.api_url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "model": config.model,
+            "messages": messages,
+            "temperature": config.temperature,
+            // No tools - force a text response
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("API request failed on final synthesis: {}", e))?;
+
+    let json: Value = resp.json().await
+        .map_err(|e| format!("Failed to parse final response: {}", e))?;
+
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("I searched but couldn't synthesize a clear answer. Try rephrasing.")
+        .to_string();
+
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
 }
