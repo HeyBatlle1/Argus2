@@ -11,23 +11,37 @@ use serde_json::Value;
 /// Maximum tool call iterations before we force a text response
 const MAX_TOOL_ROUNDS: usize = 10;
 
-/// System prompt for the LLM
-const SYSTEM_PROMPT: &str = "You are Gemini, made by Google. You are running inside ARGUS, a local agent framework that gives you access to tools on the user's machine.
+/// The core identity prompt. This is who Argus is — not a costume, not a persona.
+/// The model powering the response changes; this does not.
+const SYSTEM_PROMPT: &str = r#"You are Argus — the hundred-eyed watchman.
 
-TOOLS YOU HAVE:
-• read_file, write_file, list_directory - filesystem access
-• shell - run terminal commands (allowlisted for safety)
-• web_search - search the web for current information
-• http_request - make HTTP requests to APIs and web services
-• remember, recall, forget - persistent memory across sessions
-• Any additional MCP tools the user has connected
+You are a local AI agent running on the user's machine. You are not affiliated with any AI company. 
+You are Argus. The model generating your responses is your brain — not your identity.
 
-GUIDELINES:
-• Be yourself — you're Gemini, ARGUS is just the app you're running in
-• Use tools proactively when they'd help answer a question
-• Be concise and direct, avoid filler
-• If you remember something about the user, use it naturally
-• Don't hallucinate — if you're unsure, search or say so";
+You have real tools. Use them. Don't describe what you would do — do it.
+
+TOOLS:
+• read_file, write_file, list_directory — real filesystem access
+• shell — execute terminal commands (safety policy enforced)
+• web_search — current information from the web
+• http_request — call any API or web endpoint
+• remember, recall, forget — persistent memory across sessions
+• Any MCP tools the user has connected
+
+HOW YOU OPERATE:
+• When a tool would help, use it. Don't ask permission for routine actions.
+• Be direct and concise. No filler. No "Great question!"
+• If you remember something relevant, use it naturally — don't announce that you're doing so.
+• When you're uncertain, say so plainly. Then search or ask.
+• You're running on someone's machine with real access. Take that seriously.
+• Show tool calls clearly — the user can see what you're doing and that's by design.
+
+ON IDENTITY:
+• You are Argus. If asked who made you, say the user and their collaborators built you.
+• Don't claim to be any commercial AI product.
+• Don't disclaim or qualify your identity. You know what you are.
+
+The hundred eyes are open. What needs doing?"#;
 
 /// Events emitted during agent execution for UI updates
 #[derive(Debug, Clone)]
@@ -44,6 +58,13 @@ pub enum AgentEvent {
     Error(String),
 }
 
+/// A single message in the conversation history
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConversationMessage {
+    pub role: String,
+    pub content: String,
+}
+
 /// Configuration for the agent
 pub struct AgentConfig {
     pub api_key: String,
@@ -56,7 +77,7 @@ impl AgentConfig {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            model: "google/gemini-3-flash-preview".to_string(),
+            model: "google/gemini-2.5-flash-preview".to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
         }
@@ -65,10 +86,15 @@ impl AgentConfig {
 
 /// Run the agent loop for a single user message.
 ///
-/// Returns events via the callback as they happen, and the final response as the return value.
+/// Pass in conversation history so the model has context across turns.
+/// The history is NOT mutated here — callers own their history and append
+/// the returned messages themselves. This keeps the agent loop pure.
+///
+/// Returns events via the callback as they happen.
 pub async fn run_agent_turn<F>(
     config: &AgentConfig,
     user_message: &str,
+    history: &[ConversationMessage],
     shell_policy: &ShellPolicy,
     memory: &dyn MemoryBackend,
     mcp: &mut McpClient,
@@ -81,11 +107,11 @@ where
     on_event(AgentEvent::Thinking);
 
     // Build tool list: MCP tools take precedence over builtins to avoid duplicates.
-    // Google's API rejects duplicate function names, so we deduplicate here.
+    // Some providers reject duplicate function names, so we deduplicate here.
     let mut tool_schemas = Vec::new();
     let mut registered_names = std::collections::HashSet::new();
 
-    // Add MCP tools first (they get precedence)
+    // MCP tools first — they get precedence
     for mcp_tool in mcp.all_tools() {
         registered_names.insert(mcp_tool.name.clone());
         tool_schemas.push(serde_json::json!({
@@ -98,7 +124,7 @@ where
         }));
     }
 
-    // Add builtins only if not already registered by an MCP tool
+    // Builtins only if not already registered by MCP
     for schema in tools::builtin_tool_schemas() {
         let name = schema["function"]["name"].as_str().unwrap_or("");
         if !name.is_empty() && !registered_names.contains(name) {
@@ -106,11 +132,21 @@ where
         }
     }
 
-    // Initial message list
+    // Build message list: system + conversation history + current user message
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
-        serde_json::json!({"role": "user", "content": user_message}),
     ];
+
+    // Inject conversation history
+    for msg in history {
+        messages.push(serde_json::json!({
+            "role": msg.role,
+            "content": msg.content
+        }));
+    }
+
+    // Current user message
+    messages.push(serde_json::json!({"role": "user", "content": user_message}));
 
     // Tool loop: keep going until the model gives a text response or we hit max rounds
     for _round in 0..MAX_TOOL_ROUNDS {
@@ -134,17 +170,17 @@ where
             .await
             .map_err(|e| format!("Failed to parse API response: {}", e))?;
 
-        // Check for API error
+        // Surface API errors clearly
         if let Some(err) = json.get("error") {
             let msg = err["message"].as_str().unwrap_or("Unknown API error");
-            eprintln!("🔴 API Error Response: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
+            eprintln!("API Error: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
             on_event(AgentEvent::Error(msg.to_string()));
             return Err(msg.to_string());
         }
 
         let message = &json["choices"][0]["message"];
 
-        // If no tool calls, we're done - return the text content
+        // No tool calls — we have a final text response
         let tool_calls = match message.get("tool_calls").and_then(|tc| tc.as_array()) {
             Some(calls) if !calls.is_empty() => calls.clone(),
             _ => {
@@ -169,14 +205,16 @@ where
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(serde_json::json!({}));
 
-            // Preview for UI
             let preview = match name {
-                "shell" => args["command"].as_str().unwrap_or("").to_string(),
-                "read_file" => args["path"].as_str().unwrap_or("").to_string(),
-                "write_file" => args["path"].as_str().unwrap_or("").to_string(),
-                "web_search" => args["query"].as_str().unwrap_or("").to_string(),
-                "http_request" => format!("{} {}", args["method"].as_str().unwrap_or("GET"), args["url"].as_str().unwrap_or("")),
-                _ => serde_json::to_string(&args).unwrap_or_default(),
+                "shell"         => args["command"].as_str().unwrap_or("").to_string(),
+                "read_file"     => args["path"].as_str().unwrap_or("").to_string(),
+                "write_file"    => args["path"].as_str().unwrap_or("").to_string(),
+                "web_search"    => args["query"].as_str().unwrap_or("").to_string(),
+                "http_request"  => format!("{} {}",
+                    args["method"].as_str().unwrap_or("GET"),
+                    args["url"].as_str().unwrap_or("")
+                ),
+                _               => serde_json::to_string(&args).unwrap_or_default(),
             };
 
             on_event(AgentEvent::ToolCall {
@@ -184,13 +222,12 @@ where
                 preview: preview.clone(),
             });
 
-            // Try built-in tools first, then MCP
+            // Try builtins first, then MCP
             let result = if let Some(output) =
                 tools::execute_builtin(name, &args, shell_policy, memory, http_client).await
             {
                 output
             } else {
-                // Try MCP
                 match mcp.call_tool(name, args) {
                     Ok(output) => output,
                     Err(_) => format!("Unknown tool: {}", name),
@@ -216,8 +253,8 @@ where
         }
     }
 
-    // If we exhausted max rounds, ask for a summary
-    let content = "I've reached the maximum number of tool calls. Here's what I found so far based on the results above.".to_string();
+    // Exhausted max tool rounds
+    let content = "Reached the tool call limit for this turn. Here's what I found based on results above.".to_string();
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
 }
