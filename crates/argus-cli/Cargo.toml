@@ -23,3 +23,7 @@ urlencoding = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 teloxide = { version = "0.12", features = ["macros", "rustls", "ctrlc_handler"], default-features = false }
+axum = { version = "0.7", features = ["ws", "json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"

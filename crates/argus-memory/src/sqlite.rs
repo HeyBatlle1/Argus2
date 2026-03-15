@@ -108,7 +108,7 @@ impl MemoryBackend for SqliteMemory {
 
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (query, memory_type) {
             (Some(q), Some(t)) => (
-                "SELECT memory_type, content, importance, created_at FROM memories WHERE content LIKE ?1 AND memory_type = ?2 ORDER BY importance DESC LIMIT ?3".to_string(),
+                "SELECT id, memory_type, content, importance, created_at FROM memories WHERE content LIKE ?1 AND memory_type = ?2 ORDER BY importance DESC LIMIT ?3".to_string(),
                 vec![
                     Box::new(format!("%{}%", q)) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(t.to_string()),
@@ -116,21 +116,21 @@ impl MemoryBackend for SqliteMemory {
                 ],
             ),
             (Some(q), None) => (
-                "SELECT memory_type, content, importance, created_at FROM memories WHERE content LIKE ?1 ORDER BY importance DESC LIMIT ?2".to_string(),
+                "SELECT id, memory_type, content, importance, created_at FROM memories WHERE content LIKE ?1 ORDER BY importance DESC LIMIT ?2".to_string(),
                 vec![
                     Box::new(format!("%{}%", q)) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(limit as i64),
                 ],
             ),
             (None, Some(t)) => (
-                "SELECT memory_type, content, importance, created_at FROM memories WHERE memory_type = ?1 ORDER BY importance DESC LIMIT ?2".to_string(),
+                "SELECT id, memory_type, content, importance, created_at FROM memories WHERE memory_type = ?1 ORDER BY importance DESC LIMIT ?2".to_string(),
                 vec![
                     Box::new(t.to_string()) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(limit as i64),
                 ],
             ),
             (None, None) => (
-                "SELECT memory_type, content, importance, created_at FROM memories ORDER BY importance DESC LIMIT ?1".to_string(),
+                "SELECT id, memory_type, content, importance, created_at FROM memories ORDER BY importance DESC LIMIT ?1".to_string(),
                 vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
             ),
         };
@@ -141,10 +141,11 @@ impl MemoryBackend for SqliteMemory {
         let rows = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(MemoryRecord {
-                    memory_type: row.get(0)?,
-                    content: row.get(1)?,
-                    importance: row.get(2)?,
-                    created_at: row.get(3)?,
+                    id: row.get(0)?,
+                    memory_type: row.get(1)?,
+                    content: row.get(2)?,
+                    importance: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?;

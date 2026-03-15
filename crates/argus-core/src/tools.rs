@@ -203,6 +203,7 @@ pub trait MemoryBackend: Send + Sync {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryRecord {
+    pub id: i64,
     pub memory_type: String,
     pub content: String,
     pub importance: f64,

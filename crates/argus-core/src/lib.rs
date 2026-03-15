@@ -7,7 +7,7 @@ pub mod mcp;
 pub mod shell;
 pub mod tools;
 
-pub use agent::{AgentConfig, AgentEvent, ConversationMessage, run_agent_turn};
+pub use agent::{AgentConfig, AgentEvent, ConversationMessage, run_agent_turn, MODEL_HAIKU, MODEL_GROK};
 pub use mcp::McpClient;
 pub use shell::ShellPolicy;
 pub use tools::{MemoryBackend, MemoryRecord};

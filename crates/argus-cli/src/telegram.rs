@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 use argus_memory::sqlite::SqliteMemory;
-use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy};
+use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy, MODEL_HAIKU, MODEL_GROK};
 
 struct ArgusBot {
     config: AgentConfig,
@@ -42,6 +42,33 @@ impl ArgusBot {
         }
     }
 
+    fn handle_command(&mut self, text: &str) -> Option<String> {
+        let parts: Vec<&str> = text.splitn(2, ' ').collect();
+        match parts[0] {
+            "/model" => {
+                if parts.len() == 1 {
+                    // Show current + options
+                    let label = if self.config.model == MODEL_HAIKU { "haiku" } else { "grok" };
+                    Some(format!(
+                        "Current model: {} ({})\n\nAvailable:\n  haiku — {}\n  grok  — {}\n\nSwitch with /model haiku or /model grok",
+                        label, self.config.model, MODEL_HAIKU, MODEL_GROK
+                    ))
+                } else {
+                    match self.config.set_model(parts[1].trim()) {
+                        Ok(id) => Some(format!("Switched to: {}", id)),
+                        Err(e) => Some(e),
+                    }
+                }
+            }
+            "/toggle" => {
+                let new_model = self.config.toggle_model().to_string();
+                let label = if new_model == MODEL_HAIKU { "haiku" } else { "grok" };
+                Some(format!("Switched to {} ({})", label, new_model))
+            }
+            _ => None,
+        }
+    }
+
     async fn process_message(&mut self, chat_id: i64, user_msg: &str) -> String {
         let history_snapshot = self.histories.entry(chat_id).or_default().clone();
 
@@ -57,7 +84,7 @@ impl ArgusBot {
             &mut self.mcp,
             &self.client,
             |event| match event {
-                AgentEvent::ToolCall { name, preview } => {
+                AgentEvent::ToolCall { name, preview, .. } => {
                     let short = if preview.len() > 80 { format!("{}...", &preview[..80]) } else { preview };
                     tool_log.push(format!("[tool] {}: {}", name, short));
                 }
@@ -103,7 +130,11 @@ pub async fn run_telegram_bot(token: String, config: AgentConfig) {
                 let chat_id = msg.chat.id.0;
                 let response = {
                     let mut agent = argus.lock().await;
-                    agent.process_message(chat_id, text).await
+                    if let Some(cmd_reply) = agent.handle_command(text) {
+                        cmd_reply
+                    } else {
+                        agent.process_message(chat_id, text).await
+                    }
                 };
                 for chunk in response.chars().collect::<Vec<_>>().chunks(4000) {
                     let chunk_str: String = chunk.iter().collect();

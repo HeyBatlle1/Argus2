@@ -2,6 +2,7 @@
 
 mod telegram;
 mod tui;
+mod web;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -45,6 +46,11 @@ enum Commands {
     Vault {
         #[command(subcommand)]
         action: VaultAction,
+    },
+    /// Serve the web frontend via WebSocket + REST
+    Web {
+        #[arg(short, long, default_value = "9000")]
+        port: u16,
     },
     /// Run in daemon mode
     Daemon,
@@ -144,6 +150,16 @@ async fn main() -> anyhow::Result<()> {
             };
             let config = load_agent_config(vault, None)?;
             telegram::run_telegram_bot(bot_token, config).await;
+        }
+
+        Some(Commands::Web { port }) => {
+            let vault = vault.as_mut().unwrap();
+            let config = load_agent_config(vault, None)?;
+            if config.brave_search_key.is_none() {
+                eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
+            }
+            println!("{}", LOGO);
+            web::run_web_server(port, config).await?;
         }
 
         Some(Commands::Daemon) => {

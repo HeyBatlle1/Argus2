@@ -131,7 +131,7 @@ impl App {
             &mut self.mcp,
             &self.client,
             |event| match event {
-                AgentEvent::ToolCall { name, preview } => {
+                AgentEvent::ToolCall { name, preview, .. } => {
                     self.state = ArgusState::Executing;
                     let short = if preview.len() > 60 { format!("{}...", &preview[..60]) } else { preview };
                     tool_log.push(format!("[tool] {}: {}", name, short));

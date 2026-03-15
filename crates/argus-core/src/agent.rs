@@ -56,8 +56,10 @@ CURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Thinking,
-    ToolCall { name: String, preview: String },
-    ToolResult { name: String, preview: String },
+    /// Full tool call — id ties call to result, args are the raw JSON
+    ToolCall { id: String, name: String, args: serde_json::Value, preview: String },
+    /// Full tool result — id matches the ToolCall, result is the raw output
+    ToolResult { id: String, name: String, result: String, success: bool, preview: String },
     Response(String),
     Error(String),
 }
@@ -67,6 +69,9 @@ pub struct ConversationMessage {
     pub role: String,
     pub content: String,
 }
+
+pub const MODEL_HAIKU: &str = "anthropic/claude-haiku-4-5";
+pub const MODEL_GROK: &str = "x-ai/grok-4.1-fast";
 
 pub struct AgentConfig {
     pub api_key: String,
@@ -81,7 +86,7 @@ impl AgentConfig {
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
-            model: "google/gemini-2.5-flash-preview".to_string(),
+            model: MODEL_HAIKU.to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
             brave_search_key,
@@ -91,6 +96,25 @@ impl AgentConfig {
     pub fn with_brave_key(mut self, key: impl Into<String>) -> Self {
         self.brave_search_key = Some(key.into());
         self
+    }
+
+    /// Toggle between the two supported models. Returns the newly active model ID.
+    pub fn toggle_model(&mut self) -> &str {
+        if self.model == MODEL_HAIKU {
+            self.model = MODEL_GROK.to_string();
+        } else {
+            self.model = MODEL_HAIKU.to_string();
+        }
+        &self.model
+    }
+
+    /// Set model by short alias ("haiku"/"grok") or full OpenRouter ID.
+    pub fn set_model(&mut self, name: &str) -> Result<&str, String> {
+        match name.to_lowercase().as_str() {
+            "haiku" | MODEL_HAIKU => { self.model = MODEL_HAIKU.to_string(); Ok(&self.model) }
+            "grok"  | MODEL_GROK  => { self.model = MODEL_GROK.to_string();  Ok(&self.model) }
+            other => Err(format!("Unknown model '{}'. Use: haiku, grok", other)),
+        }
     }
 }
 
@@ -206,7 +230,12 @@ where
                 _              => serde_json::to_string(&args).unwrap_or_default(),
             };
 
-            on_event(AgentEvent::ToolCall { name: name.to_string(), preview: preview.clone() });
+            on_event(AgentEvent::ToolCall {
+                id: tool_call_id.to_string(),
+                name: name.to_string(),
+                args: args.clone(),
+                preview: preview.clone(),
+            });
 
             let result = if let Some(output) =
                 tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref()).await
@@ -225,7 +254,14 @@ where
                 result.clone()
             };
 
-            on_event(AgentEvent::ToolResult { name: name.to_string(), preview: result_preview });
+            let success = !result.starts_with("Error:") && !result.starts_with("Unknown tool:");
+            on_event(AgentEvent::ToolResult {
+                id: tool_call_id.to_string(),
+                name: name.to_string(),
+                result: result.clone(),
+                success,
+                preview: result_preview,
+            });
 
             messages.push(serde_json::json!({
                 "role": "tool",
