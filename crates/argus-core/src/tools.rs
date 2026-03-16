@@ -5,8 +5,6 @@
 use crate::shell::{self, ShellPolicy};
 use serde_json::Value;
 
-// Hard cap on tool output size — keeps us well under any model's context window.
-// read_file: 8000 chars, directory: 200 entries, search results: 6 hits.
 const MAX_FILE_CHARS: usize = 8_000;
 const MAX_DIR_ENTRIES: usize = 200;
 const MAX_SEARCH_RESULTS: usize = 6;
@@ -17,7 +15,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file from the filesystem. Output is capped at 8000 chars.",
+                "description": "Read the contents of a file from the filesystem. Output capped at 8000 chars.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -225,8 +223,7 @@ fn tool_read_file(args: &Value) -> String {
     match std::fs::read_to_string(path) {
         Ok(content) => {
             if content.len() > MAX_FILE_CHARS {
-                format!("{}...\n[truncated, {} bytes total — use a specific line range if needed]",
-                    &content[..MAX_FILE_CHARS], content.len())
+                format!("{}...\n[truncated, {} bytes total]", &content[..MAX_FILE_CHARS], content.len())
             } else {
                 content
             }
@@ -253,7 +250,7 @@ fn tool_list_directory(args: &Value) -> String {
             }
             if total > MAX_DIR_ENTRIES {
                 result.push_str(&format!(
-                    "\n[showing {}/{} entries — use a more specific path to see more]\n",
+                    "\n[showing {}/{} entries — use a more specific path]\n",
                     MAX_DIR_ENTRIES, total
                 ));
             }
@@ -297,10 +294,8 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
         urlencoding::encode(query)
     );
 
-    // Do NOT send Accept-Encoding: gzip — reqwest handles decompression
-    // automatically when the gzip feature is enabled. Sending it manually
-    // causes a double-encoding bug where the raw compressed bytes come back
-    // and serde_json fails to parse them.
+    // No Accept-Encoding: gzip — reqwest handles decompression automatically.
+    // Sending it manually causes double-encoding and breaks JSON parsing.
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
@@ -316,7 +311,6 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
                 let body = r.text().await.unwrap_or_default();
                 return format!("Brave Search error {}: {}", status, body);
             }
-            // Try JSON parse — if it fails, log the raw text for debugging
             let text = match r.text().await {
                 Err(e) => return format!("Brave Search read error: {}", e),
                 Ok(t) => t,
@@ -329,9 +323,9 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
                 Ok(j) => j,
             };
 
-            let results = json["web"]["results"].as_array();
-            match results {
-                None | Some([]) => format!("No results found for '{}'", query),
+            match json["web"]["results"].as_array() {
+                None => format!("No results found for '{}'", query),
+                Some(results) if results.is_empty() => format!("No results found for '{}'", query),
                 Some(results) => {
                     let mut output = format!("Search results for '{}':\n\n", query);
                     for r in results.iter().take(MAX_SEARCH_RESULTS) {
