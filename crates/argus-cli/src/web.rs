@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
-use argus_core::{AgentConfig, AgentEvent, ConversationMessage, McpClient, MemoryBackend, ShellPolicy, MODEL_HAIKU, MODEL_GROK};
+use argus_core::{AgentConfig, AgentEvent, ConversationMessage, McpClient, MemoryBackend, ShellPolicy, MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK};
 use argus_memory::sqlite::SqliteMemory;
 
 // ─── WebSocket message types (mirrors TypeScript protocol) ─────────────────
@@ -123,10 +123,11 @@ impl ConnectionState {
     fn apply_model_switch(&mut self, frontend_id: &str) {
         let openrouter_id = match frontend_id {
             "claude-haiku"  => MODEL_HAIKU,
-            "claude-opus"   => "anthropic/claude-opus-4-6",
+            "claude-sonnet" => MODEL_SONNET,
+            "claude-opus"   => MODEL_OPUS,
             "grok"          => MODEL_GROK,
             "gemini-flash"  => "google/gemini-2.5-flash",
-            other           => other,  // pass through if already a full ID
+            other           => other, // pass through if already a full ID
         };
         self.config.model = openrouter_id.to_string();
     }
@@ -134,11 +135,12 @@ impl ConnectionState {
     /// Map OpenRouter model ID → frontend alias
     fn current_frontend_model(&self) -> String {
         match self.config.model.as_str() {
-            MODEL_HAIKU                   => "claude-haiku".to_string(),
-            "anthropic/claude-opus-4-6"   => "claude-opus".to_string(),
-            MODEL_GROK                    => "grok".to_string(),
-            "google/gemini-2.5-flash"     => "gemini-flash".to_string(),
-            other                         => other.to_string(),
+            MODEL_HAIKU  => "claude-haiku".to_string(),
+            MODEL_SONNET => "claude-sonnet".to_string(),
+            MODEL_OPUS   => "claude-opus".to_string(),
+            MODEL_GROK   => "grok".to_string(),
+            "google/gemini-2.5-flash" => "gemini-flash".to_string(),
+            other => other.to_string(),
         }
     }
 }
@@ -213,10 +215,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (ws_tx, ws_rx) = socket.split();
     let ws_tx = Arc::new(Mutex::new(ws_tx));
 
-    // Channel for sending messages back to the client
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-    // Spawn writer task — drains the channel to the WebSocket
     let ws_tx_writer = Arc::clone(&ws_tx);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -234,7 +234,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    // Initialize per-connection state
     let conn = match ConnectionState::new(state.api_key.clone(), state.brave_key.clone()) {
         Ok(c) => c,
         Err(e) => {
@@ -244,7 +243,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     };
     let conn = Arc::new(Mutex::new(conn));
 
-    // Send connected message + initial memory snapshot
     {
         let c = conn.lock().await;
         let _ = tx.send(ServerMessage::Connected {
@@ -254,7 +252,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = tx.send(build_memory_update(&c.memory));
     }
 
-    // Read messages from the client
     let mut ws_rx = ws_rx;
     while let Some(Ok(msg)) = ws_rx.next().await {
         let text = match msg {
@@ -287,7 +284,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 });
             }
             ClientMessage::Cancel => {
-                // TODO: cancellation token — for now just ignore
                 let _ = tx.send(ServerMessage::Status {
                     eye_state: "watching".to_string(),
                     model: {
@@ -300,7 +296,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-// ─── Message handler — runs the agent turn ────────────────────────────────
+// ─── Message handler ──────────────────────────────────────────────────────
 
 async fn handle_user_message(
     user_msg: String,
@@ -309,10 +305,8 @@ async fn handle_user_message(
 ) {
     let _ = tx.send(ServerMessage::Thinking);
 
-    // Snapshot state we need (release lock before await)
     let (config_snapshot, history_snapshot) = {
         let c = conn.lock().await;
-        // We can't clone AgentConfig directly so we rebuild what we need
         (
             (c.config.api_key.clone(), c.config.model.clone(), c.config.api_url.clone(),
              c.config.temperature, c.config.brave_search_key.clone()),
@@ -328,14 +322,10 @@ async fn handle_user_message(
 
     let tx_clone = tx.clone();
 
-    // We need to hold the lock across the entire agent turn because
-    // it holds &mut mcp and &memory (not Clone). Run on a separate task.
     let result: Result<String, String> = {
         let mut c = conn.lock().await;
         let mut response_text = String::new();
 
-        // Pattern-destructure to split borrows simultaneously — the only way
-        // to hold both &T and &mut T on different fields through a MutexGuard.
         let ConnectionState {
             ref shell_policy,
             ref memory,
@@ -385,7 +375,6 @@ async fn handle_user_message(
 
         match r {
             Ok(text) => {
-                // Update history
                 c.history.push(ConversationMessage {
                     role: "user".to_string(),
                     content: user_msg.clone(),
@@ -394,7 +383,6 @@ async fn handle_user_message(
                     role: "assistant".to_string(),
                     content: text.clone(),
                 });
-                // Keep history bounded
                 if c.history.len() > 40 {
                     let drain = c.history.len() - 40;
                     c.history.drain(0..drain);
