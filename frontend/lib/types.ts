@@ -1,5 +1,5 @@
 export type EyeState = 'watching' | 'thinking' | 'executing' | 'complete';
-export type ModelId = 'claude-haiku' | 'claude-opus' | 'grok' | 'gemini-flash';
+export type ModelId = 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | 'grok' | 'gemini-flash';
 export type AccessTier = 'royal' | 'allied' | 'guest';
 export type ToolName =
   | 'read_file'
