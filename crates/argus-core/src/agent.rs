@@ -5,10 +5,8 @@ use crate::shell::ShellPolicy;
 use crate::tools::{self, MemoryBackend};
 use serde_json::Value;
 
-/// Hard limit on tool rounds per turn. 4 is enough for almost everything—
-/// search, read a result, maybe one follow-up. If we're burning 10 rounds
-/// something is wrong with the query strategy, not the limit.
 const MAX_TOOL_ROUNDS: usize = 4;
+const PREVIEW_CHARS: usize = 100;
 
 const SYSTEM_PROMPT_BASE: &str = r#"You are Argus — the hundred-eyed watchman.
 
@@ -41,8 +39,6 @@ ON IDENTITY:
 
 The hundred eyes are open. What needs doing?"#;
 
-/// Build the system prompt with the current date injected at runtime.
-/// This prevents the model from using its training cutoff date for time-sensitive queries.
 fn build_system_prompt() -> String {
     let now = chrono::Utc::now();
     let date_str = now.format("%A, %B %d, %Y").to_string();
@@ -51,12 +47,19 @@ fn build_system_prompt() -> String {
     )
 }
 
+/// Truncate a string to at most `max_chars` Unicode scalar values.
+/// Never panics on multibyte characters.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Thinking,
-    /// Full tool call — id ties call to result, args are the raw JSON
     ToolCall { id: String, name: String, args: serde_json::Value, preview: String },
-    /// Full tool result — id matches the ToolCall, result is the raw output
     ToolResult { id: String, name: String, result: String, success: bool, preview: String },
     Response(String),
     Error(String),
@@ -69,14 +72,11 @@ pub struct ConversationMessage {
 }
 
 // ── Model constants ────────────────────────────────────────────────────────
-// All routed through OpenRouter for maximum flexibility while keeping
-// costs manageable. Swap the active model without touching API plumbing.
 pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
 pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-5";
 pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-5";
 pub const MODEL_GROK:   &str = "x-ai/grok-3-mini-beta";
 
-/// Human-readable label for display in the UI.
 pub fn model_label(model_id: &str) -> &'static str {
     match model_id {
         MODEL_HAIKU  => "Haiku  (fast / cheap)",
@@ -100,8 +100,6 @@ impl AgentConfig {
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
-            // Default to Haiku — fastest and cheapest for everyday tasks.
-            // Switch up to Sonnet/Opus for heavy reasoning via set_model().
             model: MODEL_HAIKU.to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
@@ -114,7 +112,6 @@ impl AgentConfig {
         self
     }
 
-    /// Cycle through models in order: Haiku → Sonnet → Opus → Grok → Haiku
     pub fn toggle_model(&mut self) -> &str {
         self.model = match self.model.as_str() {
             MODEL_HAIKU  => MODEL_SONNET.to_string(),
@@ -125,8 +122,6 @@ impl AgentConfig {
         &self.model
     }
 
-    /// Set model by short alias or full OpenRouter ID.
-    /// Aliases: "haiku", "sonnet", "opus", "grok"
     pub fn set_model(&mut self, name: &str) -> Result<&str, String> {
         self.model = match name.to_lowercase().as_str() {
             "haiku"  | MODEL_HAIKU  => MODEL_HAIKU.to_string(),
@@ -182,7 +177,6 @@ where
         }
     }
 
-    // Build system prompt with current date injected
     let system_prompt = build_system_prompt();
 
     let mut messages = vec![
@@ -254,14 +248,14 @@ where
                     args["method"].as_str().unwrap_or("GET"),
                     args["url"].as_str().unwrap_or("")
                 ),
-                _              => serde_json::to_string(&args).unwrap_or_default(),
+                _ => serde_json::to_string(&args).unwrap_or_default(),
             };
 
             on_event(AgentEvent::ToolCall {
                 id: tool_call_id.to_string(),
                 name: name.to_string(),
                 args: args.clone(),
-                preview: preview.clone(),
+                preview,
             });
 
             let result = if let Some(output) =
@@ -275,10 +269,14 @@ where
                 }
             };
 
-            let result_preview = if result.len() > 100 {
-                format!("{}...", &result[..100])
-            } else {
-                result.clone()
+            // Unicode-safe preview — never panics on multibyte chars
+            let result_preview = {
+                let truncated = truncate_chars(&result, PREVIEW_CHARS);
+                if truncated.len() < result.len() {
+                    format!("{}...", truncated)
+                } else {
+                    truncated.to_string()
+                }
             };
 
             let success = !result.starts_with("Error:") && !result.starts_with("Unknown tool:");
@@ -298,7 +296,7 @@ where
         }
     }
 
-    // Hit the limit — force a final response with what we have
+    // Hit the round limit — force a final text response
     messages.push(serde_json::json!({
         "role": "user",
         "content": "Summarize what you found so far and give me your best answer based on those results."
@@ -312,7 +310,6 @@ where
             "model": config.model,
             "messages": messages,
             "temperature": config.temperature,
-            // No tools - force a text response
         }))
         .send()
         .await
