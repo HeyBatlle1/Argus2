@@ -22,25 +22,35 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
     provider: 'anthropic',
     openRouterId: 'anthropic/claude-haiku-4-5',
   },
+  'claude-sonnet': {
+    id: 'claude-sonnet',
+    name: 'Claude Sonnet',
+    tier: 'royal',
+    tierLabel: 'Royal',
+    icon: '👑',
+    color: '#c9a84c',
+    provider: 'anthropic',
+    openRouterId: 'anthropic/claude-sonnet-4-5',
+  },
   'claude-opus': {
     id: 'claude-opus',
     name: 'Claude Opus',
     tier: 'royal',
     tierLabel: 'Royal',
     icon: '👑',
-    color: '#c9a84c',
+    color: '#e8b84b',
     provider: 'anthropic',
-    openRouterId: 'anthropic/claude-opus-4-6',
+    openRouterId: 'anthropic/claude-opus-4-5',
   },
   'grok': {
     id: 'grok',
-    name: 'Grok 4.1 Fast',
+    name: 'Grok Mini',
     tier: 'allied',
     tierLabel: 'Allied',
     icon: '🛡',
     color: '#4a7c59',
     provider: 'xai',
-    openRouterId: 'x-ai/grok-4.1-fast',
+    openRouterId: 'x-ai/grok-3-mini-beta',
   },
   'gemini-flash': {
     id: 'gemini-flash',
@@ -56,11 +66,12 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
 
 export const MODELS_IN_ORDER: ModelId[] = [
   'claude-haiku',
+  'claude-sonnet',
   'claude-opus',
   'grok',
   'gemini-flash',
 ];
 
 export function getModelTier(model: ModelId): AccessTier {
-  return MODEL_CONFIG[model].tier;
+  return MODEL_CONFIG[model]?.tier ?? 'royal';
 }
