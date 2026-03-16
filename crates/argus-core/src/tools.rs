@@ -5,13 +5,19 @@
 use crate::shell::{self, ShellPolicy};
 use serde_json::Value;
 
+// Hard cap on tool output size — keeps us well under any model's context window.
+// read_file: 8000 chars, directory: 200 entries, search results: 6 hits.
+const MAX_FILE_CHARS: usize = 8_000;
+const MAX_DIR_ENTRIES: usize = 200;
+const MAX_SEARCH_RESULTS: usize = 6;
+
 pub fn builtin_tool_schemas() -> Vec<Value> {
     serde_json::json!([
         {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file from the filesystem",
+                "description": "Read the contents of a file from the filesystem. Output is capped at 8000 chars.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -25,7 +31,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "List files and directories in a given path",
+                "description": "List files and directories in a given path. Returns up to 200 entries — use a more specific path for large directories.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -218,8 +224,9 @@ fn tool_read_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            if content.len() > 8000 {
-                format!("{}...\n[truncated, {} bytes total]", &content[..8000], content.len())
+            if content.len() > MAX_FILE_CHARS {
+                format!("{}...\n[truncated, {} bytes total — use a specific line range if needed]",
+                    &content[..MAX_FILE_CHARS], content.len())
             } else {
                 content
             }
@@ -234,13 +241,20 @@ fn tool_list_directory(args: &Value) -> String {
         Ok(entries) => {
             let mut items: Vec<_> = entries.flatten().collect();
             items.sort_by_key(|e| e.file_name());
+            let total = items.len();
             let mut result = String::new();
-            for entry in items {
+            for entry in items.iter().take(MAX_DIR_ENTRIES) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 result.push_str(&format!("{} {}\n",
                     if is_dir { "[DIR]" } else { "[FILE]" },
                     name
+                ));
+            }
+            if total > MAX_DIR_ENTRIES {
+                result.push_str(&format!(
+                    "\n[showing {}/{} entries — use a more specific path to see more]\n",
+                    MAX_DIR_ENTRIES, total
                 ));
             }
             if result.is_empty() { "(empty directory)".to_string() } else { result }
@@ -283,10 +297,13 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
         urlencoding::encode(query)
     );
 
+    // Do NOT send Accept-Encoding: gzip — reqwest handles decompression
+    // automatically when the gzip feature is enabled. Sending it manually
+    // causes a double-encoding bug where the raw compressed bytes come back
+    // and serde_json fails to parse them.
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
-        .header("Accept-Encoding", "gzip")
         .header("X-Subscription-Token", api_key)
         .send()
         .await;
@@ -299,24 +316,31 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
                 let body = r.text().await.unwrap_or_default();
                 return format!("Brave Search error {}: {}", status, body);
             }
-            match r.json::<serde_json::Value>().await {
-                Err(e) => format!("Failed to parse Brave Search response: {}", e),
-                Ok(json) => {
-                    let results = json["web"]["results"].as_array();
-                    match results {
-                        None => format!("No results found for '{}'", query),
-                        Some(results) if results.is_empty() => format!("No results found for '{}'", query),
-                        Some(results) => {
-                            let mut output = format!("Search results for '{}':\n\n", query);
-                            for r in results.iter().take(6) {
-                                let title = r["title"].as_str().unwrap_or("Untitled");
-                                let url   = r["url"].as_str().unwrap_or("");
-                                let desc  = r["description"].as_str().unwrap_or("");
-                                output.push_str(&format!("[{}]\n{}\n{}\n\n", title, desc, url));
-                            }
-                            output
-                        }
+            // Try JSON parse — if it fails, log the raw text for debugging
+            let text = match r.text().await {
+                Err(e) => return format!("Brave Search read error: {}", e),
+                Ok(t) => t,
+            };
+            let json: serde_json::Value = match serde_json::from_str(&text) {
+                Err(e) => {
+                    let preview = if text.len() > 200 { &text[..200] } else { &text };
+                    return format!("Brave Search parse error: {} — raw: {}", e, preview);
+                }
+                Ok(j) => j,
+            };
+
+            let results = json["web"]["results"].as_array();
+            match results {
+                None | Some([]) => format!("No results found for '{}'", query),
+                Some(results) => {
+                    let mut output = format!("Search results for '{}':\n\n", query);
+                    for r in results.iter().take(MAX_SEARCH_RESULTS) {
+                        let title = r["title"].as_str().unwrap_or("Untitled");
+                        let url   = r["url"].as_str().unwrap_or("");
+                        let desc  = r["description"].as_str().unwrap_or("");
+                        output.push_str(&format!("[{}]\n{}\n{}\n\n", title, desc, url));
                     }
+                    output
                 }
             }
         }
@@ -394,8 +418,8 @@ async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
             match resp.text().await {
                 Err(e) => format!("HTTP {} (body read error: {})", status, e),
                 Ok(body) => {
-                    let truncated = if body.len() > 8000 {
-                        format!("{}...\n[truncated, {} bytes total]", &body[..8000], body.len())
+                    let truncated = if body.len() > MAX_FILE_CHARS {
+                        format!("{}...\n[truncated, {} bytes total]", &body[..MAX_FILE_CHARS], body.len())
                     } else {
                         body
                     };
