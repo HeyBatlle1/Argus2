@@ -46,9 +46,7 @@ The hundred eyes are open. What needs doing?"#;
 fn build_system_prompt() -> String {
     let now = chrono::Utc::now();
     let date_str = now.format("%A, %B %d, %Y").to_string();
-    format!("{}
-
-CURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
+    format!("{}\n\nCURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
         SYSTEM_PROMPT_BASE, date_str
     )
 }
@@ -70,8 +68,24 @@ pub struct ConversationMessage {
     pub content: String,
 }
 
-pub const MODEL_HAIKU: &str = "anthropic/claude-haiku-4-5";
-pub const MODEL_GROK: &str = "x-ai/grok-4.1-fast";
+// ── Model constants ────────────────────────────────────────────────────────
+// All routed through OpenRouter for maximum flexibility while keeping
+// costs manageable. Swap the active model without touching API plumbing.
+pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
+pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-5";
+pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-5";
+pub const MODEL_GROK:   &str = "x-ai/grok-3-mini-beta";
+
+/// Human-readable label for display in the UI.
+pub fn model_label(model_id: &str) -> &'static str {
+    match model_id {
+        MODEL_HAIKU  => "Haiku  (fast / cheap)",
+        MODEL_SONNET => "Sonnet (balanced)",
+        MODEL_OPUS   => "Opus   (max intelligence)",
+        MODEL_GROK   => "Grok   (alternative)",
+        _            => "Unknown model",
+    }
+}
 
 pub struct AgentConfig {
     pub api_key: String,
@@ -86,6 +100,8 @@ impl AgentConfig {
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
+            // Default to Haiku — fastest and cheapest for everyday tasks.
+            // Switch up to Sonnet/Opus for heavy reasoning via set_model().
             model: MODEL_HAIKU.to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
@@ -98,23 +114,34 @@ impl AgentConfig {
         self
     }
 
-    /// Toggle between the two supported models. Returns the newly active model ID.
+    /// Cycle through models in order: Haiku → Sonnet → Opus → Grok → Haiku
     pub fn toggle_model(&mut self) -> &str {
-        if self.model == MODEL_HAIKU {
-            self.model = MODEL_GROK.to_string();
-        } else {
-            self.model = MODEL_HAIKU.to_string();
-        }
+        self.model = match self.model.as_str() {
+            MODEL_HAIKU  => MODEL_SONNET.to_string(),
+            MODEL_SONNET => MODEL_OPUS.to_string(),
+            MODEL_OPUS   => MODEL_GROK.to_string(),
+            _            => MODEL_HAIKU.to_string(),
+        };
         &self.model
     }
 
-    /// Set model by short alias ("haiku"/"grok") or full OpenRouter ID.
+    /// Set model by short alias or full OpenRouter ID.
+    /// Aliases: "haiku", "sonnet", "opus", "grok"
     pub fn set_model(&mut self, name: &str) -> Result<&str, String> {
-        match name.to_lowercase().as_str() {
-            "haiku" | MODEL_HAIKU => { self.model = MODEL_HAIKU.to_string(); Ok(&self.model) }
-            "grok"  | MODEL_GROK  => { self.model = MODEL_GROK.to_string();  Ok(&self.model) }
-            other => Err(format!("Unknown model '{}'. Use: haiku, grok", other)),
-        }
+        self.model = match name.to_lowercase().as_str() {
+            "haiku"  | MODEL_HAIKU  => MODEL_HAIKU.to_string(),
+            "sonnet" | MODEL_SONNET => MODEL_SONNET.to_string(),
+            "opus"   | MODEL_OPUS   => MODEL_OPUS.to_string(),
+            "grok"   | MODEL_GROK   => MODEL_GROK.to_string(),
+            other => return Err(format!(
+                "Unknown model '{}'. Use: haiku, sonnet, opus, grok", other
+            )),
+        };
+        Ok(&self.model)
+    }
+
+    pub fn current_model_label(&self) -> &'static str {
+        model_label(&self.model)
     }
 }
 
@@ -271,7 +298,7 @@ where
         }
     }
 
-    // Hit the limit - force a final response with what we have
+    // Hit the limit — force a final response with what we have
     messages.push(serde_json::json!({
         "role": "user",
         "content": "Summarize what you found so far and give me your best answer based on those results."

@@ -10,10 +10,15 @@ services:
     environment:
       - TZ=America/New_York
       - ARGUS_DATA_DIR=/argus/data
+    ports:
+      # HTTP API — frontend and MCP clients connect here
+      - "8888:8888"
     volumes:
       - argus-data:/argus/data
       - workspace:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - argus-workspace
     deploy:
       resources:
         limits:
@@ -22,8 +27,6 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
-    depends_on:
-      - argus-workspace
 
   argus-workspace:
     build:
