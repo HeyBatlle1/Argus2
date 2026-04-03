@@ -48,12 +48,20 @@ fn build_system_prompt() -> String {
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values.
-/// Never panics on multibyte characters.
 fn truncate_chars(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],
         None => s,
     }
+}
+
+/// Sanitize a tool name: only alphanumeric, underscores, hyphens. Max 64 chars.
+fn sanitize_tool_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    if clean.len() > 64 { clean[..64].to_string() } else { clean }
 }
 
 #[derive(Debug, Clone)]
@@ -155,26 +163,57 @@ where
 {
     on_event(AgentEvent::Thinking);
 
-    let mut tool_schemas = Vec::new();
-    let mut registered_names = std::collections::HashSet::new();
+    let mut tool_schemas: Vec<Value> = Vec::new();
+    let mut registered_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // MCP tools first — namespace collisions by prefixing with server name
     for mcp_tool in mcp.all_tools() {
-        registered_names.insert(mcp_tool.name.clone());
+        let raw_name = sanitize_tool_name(&mcp_tool.name);
+
+        let safe_name = if registered_names.contains(&raw_name) {
+            let prefix = sanitize_tool_name(
+                &mcp_tool.server_name.replace('-', "_").replace(' ', "_")
+            );
+            sanitize_tool_name(&format!("{}_{}", prefix, raw_name))
+        } else {
+            raw_name
+        };
+
+        if registered_names.contains(&safe_name) {
+            eprintln!("[argus] skipping duplicate MCP tool: {}", safe_name);
+            continue;
+        }
+
+        registered_names.insert(safe_name.clone());
         tool_schemas.push(serde_json::json!({
             "type": "function",
             "function": {
-                "name": mcp_tool.name,
+                "name": safe_name,
                 "description": mcp_tool.description.clone().unwrap_or_default(),
                 "parameters": mcp_tool.input_schema
             }
         }));
     }
 
+    // Built-in tools — skip any already registered by MCP
     for schema in tools::builtin_tool_schemas() {
-        let name = schema["function"]["name"].as_str().unwrap_or("");
-        if !name.is_empty() && !registered_names.contains(name) {
+        let name = match schema["function"]["name"].as_str() {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+        if !registered_names.contains(&name) {
+            registered_names.insert(name);
             tool_schemas.push(schema);
         }
+    }
+
+    // Final safety dedup — absolute guarantee before API call
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tool_schemas.retain(|s| {
+            let name = s["function"]["name"].as_str().unwrap_or("").to_string();
+            seen.insert(name)
+        });
     }
 
     let system_prompt = build_system_prompt();
@@ -263,13 +302,19 @@ where
             {
                 output
             } else {
-                match mcp.call_tool(name, args) {
+                match mcp.call_tool(name, args.clone()) {
                     Ok(output) => output,
-                    Err(_) => format!("Unknown tool: {}", name),
+                    Err(_) => {
+                        // Strip server prefix and retry (e.g. "server_toolname" -> "toolname")
+                        let short = name.splitn(2, '_').last().unwrap_or(name);
+                        match mcp.call_tool(short, args) {
+                            Ok(output) => output,
+                            Err(_) => format!("Unknown tool: {}", name),
+                        }
+                    }
                 }
             };
 
-            // Unicode-safe preview — never panics on multibyte chars
             let result_preview = {
                 let truncated = truncate_chars(&result, PREVIEW_CHARS);
                 if truncated.len() < result.len() {
@@ -296,7 +341,6 @@ where
         }
     }
 
-    // Hit the round limit — force a final text response
     messages.push(serde_json::json!({
         "role": "user",
         "content": "Summarize what you found so far and give me your best answer based on those results."
