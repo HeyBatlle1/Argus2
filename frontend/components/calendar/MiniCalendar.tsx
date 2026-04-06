@@ -32,6 +32,15 @@ function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+function riskColor(risk: string): string {
+  switch (risk) {
+    case 'high':  return '#ff4444';
+    case 'ghost': return '#9d9a91';
+    case 'medium': return '#f0a500';
+    default:      return '#39d353';
+  }
+}
+
 function creatorDot(creator: string): string {
   switch (creator) {
     case 'argus':  return '#f0a500';
@@ -52,10 +61,17 @@ export function MiniCalendar({ data = {}, onAddTask }: Props) {
   const daysInMonth = new Date(current.year, current.month + 1, 0).getDate();
 
   function prevMonth() {
-    setCurrent(c => c.month === 0 ? { year: c.year - 1, month: 11 } : { ...c, month: c.month - 1 });
+    setCurrent(c => {
+      if (c.month === 0) return { year: c.year - 1, month: 11 };
+      return { ...c, month: c.month - 1 };
+    });
   }
+
   function nextMonth() {
-    setCurrent(c => c.month === 11 ? { year: c.year + 1, month: 0 } : { ...c, month: c.month + 1 });
+    setCurrent(c => {
+      if (c.month === 11) return { year: c.year + 1, month: 0 };
+      return { ...c, month: c.month + 1 };
+    });
   }
 
   function handleDayEnter(e: React.MouseEvent, date: Date) {
@@ -69,13 +85,29 @@ export function MiniCalendar({ data = {}, onAddTask }: Props) {
 
   function handleDayLeave() {
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    leaveTimer.current = setTimeout(() => setHoveredDay(null), 200);
+    leaveTimer.current = setTimeout(() => {
+      setHoveredDay(null);
+    }, 200);
+  }
+
+  function handleBubbleEnter() {
+    if (leaveTimer.current) clearTimeout(leaveTimer.current);
+  }
+
+  function handleBubbleLeave() {
+    leaveTimer.current = setTimeout(() => {
+      setHoveredDay(null);
+    }, 150);
   }
 
   const cells: (Date | null)[] = [
     ...Array(firstDay).fill(null),
-    ...Array.from({ length: daysInMonth }, (_, i) => new Date(current.year, current.month, i + 1)),
+    ...Array.from({ length: daysInMonth }, (_, i) =>
+      new Date(current.year, current.month, i + 1)
+    ),
   ];
+
+  // Pad to full weeks
   while (cells.length % 7 !== 0) cells.push(null);
 
   const isToday = (d: Date) =>
@@ -85,56 +117,119 @@ export function MiniCalendar({ data = {}, onAddTask }: Props) {
 
   return (
     <div style={{ position: 'relative' }}>
-      <div style={{
-        width: '192px', background: '#12121e', border: '1px solid #2a2a44',
-        borderRadius: '6px', padding: '8px',
-        fontFamily: "'JetBrains Mono', monospace", userSelect: 'none',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-          <button onClick={prevMonth} style={{ background: 'none', border: 'none', color: '#9d9a91', cursor: 'pointer', padding: '0 2px' }}>
+      {/* Calendar box */}
+      <div
+        style={{
+          width: '192px',
+          background: '#12121e',
+          border: '1px solid #2a2a44',
+          borderRadius: '6px',
+          padding: '8px',
+          fontFamily: "'JetBrains Mono', monospace",
+          userSelect: 'none',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '6px',
+        }}>
+          <button
+            onClick={prevMonth}
+            style={{ background: 'none', border: 'none', color: '#9d9a91', cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}
+          >
             <ChevronLeft size={11} />
           </button>
           <span style={{ color: '#f0a500', fontSize: '10px', fontWeight: 600, letterSpacing: '0.1em' }}>
             {MONTHS[current.month]} {current.year}
           </span>
-          <button onClick={nextMonth} style={{ background: 'none', border: 'none', color: '#9d9a91', cursor: 'pointer', padding: '0 2px' }}>
+          <button
+            onClick={nextMonth}
+            style={{ background: 'none', border: 'none', color: '#9d9a91', cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}
+          >
             <ChevronRight size={11} />
           </button>
         </div>
 
+        {/* Day headers */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', marginBottom: '3px' }}>
           {DAYS.map((d, i) => (
-            <div key={i} style={{ textAlign: 'center', fontSize: '8px', color: '#5a5a7a', fontWeight: 600 }}>{d}</div>
+            <div key={i} style={{
+              textAlign: 'center',
+              fontSize: '8px',
+              color: '#5a5a7a',
+              fontWeight: 600,
+              letterSpacing: '0.05em',
+            }}>
+              {d}
+            </div>
           ))}
         </div>
 
+        {/* Day cells */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '1px' }}>
           {cells.map((date, i) => {
-            if (!date) return <div key={i} style={{ height: '22px' }} />;
+            if (!date) {
+              return <div key={i} style={{ height: '22px' }} />;
+            }
+
             const key = dateKey(date);
             const items = data[key] || [];
+            const hasItems = items.length > 0;
             const todayFlag = isToday(date);
             const isHovered = hoveredDay && dateKey(hoveredDay) === key;
+
             return (
-              <div key={i}
+              <div
+                key={i}
                 onMouseEnter={(e) => handleDayEnter(e, date)}
                 onMouseLeave={handleDayLeave}
                 style={{
-                  height: '22px', display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center', borderRadius: '3px', cursor: 'pointer',
-                  background: todayFlag ? 'rgba(240,165,0,0.15)' : isHovered ? 'rgba(240,165,0,0.07)' : 'transparent',
+                  height: '22px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: '3px',
+                  cursor: 'pointer',
+                  background: todayFlag
+                    ? 'rgba(240,165,0,0.15)'
+                    : isHovered
+                    ? 'rgba(240,165,0,0.07)'
+                    : 'transparent',
                   border: todayFlag ? '1px solid rgba(240,165,0,0.4)' : '1px solid transparent',
                   transition: 'background 0.1s ease',
                 }}
               >
-                <span style={{ fontSize: '9px', color: todayFlag ? '#f0a500' : '#d4d0c8', fontWeight: todayFlag ? 700 : 400 }}>
+                <span style={{
+                  fontSize: '9px',
+                  color: todayFlag ? '#f0a500' : '#d4d0c8',
+                  fontWeight: todayFlag ? 700 : 400,
+                  lineHeight: 1,
+                }}>
                   {date.getDate()}
                 </span>
-                {items.length > 0 && (
+
+                {/* Task dots */}
+                {hasItems && (
                   <div style={{ display: 'flex', gap: '1px', marginTop: '1px' }}>
                     {items.slice(0, 3).map((item, j) => (
-                      <div key={j} style={{ width: '3px', height: '3px', borderRadius: '50%', background: creatorDot(item.created_by), opacity: item.status === 'complete' ? 0.4 : 1 }} />
+                      <div
+                        key={j}
+                        style={{
+                          width: '3px',
+                          height: '3px',
+                          borderRadius: '50%',
+                          background: creatorDot(item.created_by),
+                          opacity: item.status === 'complete' ? 0.4 : 1,
+                        }}
+                      />
                     ))}
+                    {items.length > 3 && (
+                      <div style={{ width: '3px', height: '3px', borderRadius: '50%', background: '#5a5a7a' }} />
+                    )}
                   </div>
                 )}
               </div>
@@ -142,24 +237,39 @@ export function MiniCalendar({ data = {}, onAddTask }: Props) {
           })}
         </div>
 
-        <div style={{ display: 'flex', gap: '8px', marginTop: '6px', paddingTop: '5px', borderTop: '1px solid #1a1a2e' }}>
-          {[{ color: '#f0a500', label: 'Argus' }, { color: '#5aafef', label: 'Claude' }, { color: '#39d353', label: 'You' }].map(({ color, label }) => (
+        {/* Legend */}
+        <div style={{
+          display: 'flex',
+          gap: '8px',
+          marginTop: '6px',
+          paddingTop: '5px',
+          borderTop: '1px solid #1a1a2e',
+        }}>
+          {[
+            { color: '#f0a500', label: 'Argus' },
+            { color: '#5aafef', label: 'Claude' },
+            { color: '#39d353', label: 'You' },
+          ].map(({ color, label }) => (
             <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
               <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: color }} />
-              <span style={{ fontSize: '7px', color: '#5a5a7a' }}>{label}</span>
+              <span style={{ fontSize: '7px', color: '#5a5a7a', letterSpacing: '0.05em' }}>{label}</span>
             </div>
           ))}
         </div>
       </div>
 
+      {/* Hover thought bubble */}
       {hoveredDay && (
         <DayBubble
           date={hoveredDay}
           items={data[dateKey(hoveredDay)] || []}
           anchorPos={bubblePos}
-          onMouseEnter={() => { if (leaveTimer.current) clearTimeout(leaveTimer.current); }}
-          onMouseLeave={() => { leaveTimer.current = setTimeout(() => setHoveredDay(null), 150); }}
-          onAddTask={(title) => { onAddTask?.(hoveredDay, title); setHoveredDay(null); }}
+          onMouseEnter={handleBubbleEnter}
+          onMouseLeave={handleBubbleLeave}
+          onAddTask={(title) => {
+            onAddTask?.(hoveredDay, title);
+            setHoveredDay(null);
+          }}
         />
       )}
     </div>
