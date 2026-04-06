@@ -116,7 +116,7 @@ export class MockConnection implements ArgusConnection {
 
 function buildDevResponse(input: string, model: ModelId): string {
   const lower = input.toLowerCase().trim();
-  const modelName = { 'claude-haiku': 'Claude Haiku', 'claude-opus': 'Claude Opus', 'grok': 'Grok', 'gemini-flash': 'Gemini Flash' }[model] ?? model;
+  const modelName = { 'claude-haiku': 'Claude Haiku', 'claude-opus': 'Claude Opus', 'claude-sonnet': 'Claude Sonnet', 'grok': 'Grok', 'gemini-flash': 'Gemini Flash' }[model] ?? model;
 
   if (lower.match(/^(hi|hello|hey|sup|yo)\b/)) {
     return `The hundred eyes are open.\n\nRunning on **${modelName}** (dev mode). What do you need?`;

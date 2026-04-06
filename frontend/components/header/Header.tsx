@@ -3,6 +3,7 @@
 import { ArgusEye } from './ArgusEye';
 import { ConnectionStatus } from './ConnectionStatus';
 import { ModelSelector } from './ModelSelector';
+import { SentryDropdown } from './SentryDropdown';
 
 export function Header() {
   return (
@@ -26,8 +27,11 @@ export function Header() {
       {/* Center: Connection status */}
       <ConnectionStatus />
 
-      {/* Right: Model selector */}
-      <ModelSelector />
+      {/* Right: Sentry + Model selector */}
+      <div className="flex items-center gap-2">
+        <SentryDropdown />
+        <ModelSelector />
+      </div>
     </header>
   );
 }

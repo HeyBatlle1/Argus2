@@ -5,14 +5,15 @@ services:
       dockerfile: Dockerfile
     container_name: argus-daemon
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       - TZ=America/New_York
       - ARGUS_DATA_DIR=/argus/data
+      # Injected at launch time from vault via argus-up.sh — no plaintext .env file
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     ports:
-      # HTTP API — frontend and MCP clients connect here
       - "8888:8888"
+      - "9000:9000"
     volumes:
       - argus-data:/argus/data
       - workspace:/workspace
@@ -27,6 +28,25 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
+
+  argus-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: argus-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://argus-daemon:9000/ws
+      - NODE_ENV=production
+    depends_on:
+      - argus-daemon
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
 
   argus-workspace:
     build:

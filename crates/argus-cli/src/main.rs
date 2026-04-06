@@ -98,7 +98,19 @@ async fn main() -> anyhow::Result<()> {
 
     let vault_file = vault_path();
     let mut vault = if matches!(cli.command, Some(Commands::Daemon)) {
-        None
+        // Daemon tries vault but doesn't fail — falls back to env vars (needed in Docker/Linux)
+        if vault_file.exists() {
+            let mut v = SecureVault::new(vault_file.clone());
+            match v.unlock() {
+                Ok(()) => Some(v),
+                Err(e) => {
+                    eprintln!("[!] Vault unavailable ({}), falling back to env vars", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     } else {
         if let Some(parent) = vault_file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -163,21 +175,33 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Daemon) => {
-            println!("Argus daemon starting...");
-            let api_key = std::env::var("OPENROUTER_API_KEY")
-                .map_err(|_| anyhow::anyhow!("OPENROUTER_API_KEY env var not set"))?;
+            println!("🔴 Argus daemon starting...");
+            // Vault-first, env var fallback (vault unavailable in Docker/Linux)
+            let api_key = vault.as_ref()
+                .and_then(|v| v.retrieve("openrouter_api_key").ok())
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                .ok_or_else(|| anyhow::anyhow!(
+                    "OpenRouter key not found. Vault unavailable and OPENROUTER_API_KEY env var not set."
+                ))?;
             let mut config = AgentConfig::new(api_key);
-            if let Ok(brave_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
+            if let Some(brave_key) = vault.as_ref()
+                .and_then(|v| v.retrieve("brave_search_api_key").ok())
+                .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok())
+            {
                 config.brave_search_key = Some(brave_key);
             }
-            let bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+            let bot_token = vault.as_ref()
+                .and_then(|v| v.retrieve("telegram_bot_token").ok())
+                .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok());
             match bot_token {
                 Some(token) => {
-                    println!("[+] Telegram bot enabled");
+                    println!("✓ Telegram bot enabled");
+                    println!("✓ Daemon running (Ctrl+C to stop)");
+                    println!("Argus Telegram bot starting...");
                     telegram::run_telegram_bot(token, config).await;
                 }
                 None => {
-                    println!("[!] No TELEGRAM_BOT_TOKEN set - running idle");
+                    println!("[!] No Telegram token found in vault or env - running idle");
                     tokio::signal::ctrl_c().await?;
                     println!("Daemon stopped");
                 }

@@ -12,3 +12,7 @@ Thumbs.db
 docs/
 data/
 *.db
+.env
+.env.*
+frontend/node_modules
+frontend/.next
