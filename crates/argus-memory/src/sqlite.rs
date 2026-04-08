@@ -3,6 +3,7 @@
 //! Replaces the Python subprocess bridge. No more shelling out to Python
 //! for every memory operation. Direct rusqlite with proper error handling.
 
+use argus_core::agent::ConversationMessage;
 use argus_core::tools::{MemoryBackend, MemoryRecord};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
@@ -29,7 +30,7 @@ impl SqliteMemory {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
-        // Create table if not exists
+        // Create tables if not exist
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,9 +42,17 @@ impl SqliteMemory {
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
-            CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);",
+            CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_chat ON conversation_history(chat_id, id);",
         )
-        .map_err(|e| format!("Failed to create memories table: {}", e))?;
+        .map_err(|e| format!("Failed to create tables: {}", e))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -57,6 +66,49 @@ impl SqliteMemory {
             .join(".argus")
             .join("memory.db");
         Self::open(path)
+    }
+
+    /// Persist conversation history for a chat. Replaces existing history for that chat_id.
+    /// Keeps at most 40 most recent turns.
+    pub fn save_history(&self, chat_id: i64, messages: &[ConversationMessage]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM conversation_history WHERE chat_id = ?1", params![chat_id])
+            .map_err(|e| format!("Failed to clear history: {}", e))?;
+
+        let start = messages.len().saturating_sub(40);
+        for msg in &messages[start..] {
+            conn.execute(
+                "INSERT INTO conversation_history (chat_id, role, content) VALUES (?1, ?2, ?3)",
+                params![chat_id, msg.role, msg.content],
+            )
+            .map_err(|e| format!("Failed to save history turn: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Load persisted conversation history for a chat.
+    pub fn load_history(&self, chat_id: i64) -> Result<Vec<ConversationMessage>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, content FROM conversation_history WHERE chat_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![chat_id], |row| {
+                Ok(ConversationMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut history = Vec::new();
+        for row in rows {
+            if let Ok(msg) = row {
+                history.push(msg);
+            }
+        }
+        Ok(history)
     }
 }
 

@@ -99,23 +99,13 @@ impl ConnectionState {
         let mut mcp = McpClient::new();
         let _ = mcp.connect_all();
 
-        let mut shell_policy = ShellPolicy::empty();
-        for cmd in &[
-            "ls", "cat", "head", "tail", "grep", "find", "wc", "echo", "pwd",
-            "date", "whoami", "uname", "df", "du", "ps", "which", "file",
-            "stat", "sort", "uniq", "tr", "cut", "awk", "sed",
-            "curl", "wget", "git", "cargo", "python3", "node", "npm", "pip",
-        ] {
-            shell_policy.allow(cmd);
-        }
-
         Ok(Self {
             config,
             history: Vec::new(),
             client: reqwest::Client::new(),
             memory,
             mcp,
-            shell_policy,
+            shell_policy: ShellPolicy::default(),
         })
     }
 

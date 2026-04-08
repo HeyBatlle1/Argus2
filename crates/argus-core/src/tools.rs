@@ -271,8 +271,8 @@ fn tool_write_file(args: &Value) -> String {
 
 async fn tool_shell(args: &Value, policy: &ShellPolicy) -> String {
     let command = args["command"].as_str().unwrap_or("");
-    match shell::execute_shell(policy, command).await {
-        Ok(output) => output,
+    match shell::execute_shell(policy, command, None).await {
+        Ok((output, _risk)) => output,
         Err(e) => format!("Shell error: {}", e),
     }
 }

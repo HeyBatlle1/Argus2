@@ -1,5 +1,6 @@
 //! Argus CLI - The Hundred-Eyed Agent
 
+mod checkin;
 mod telegram;
 mod tui;
 mod web;
@@ -175,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Daemon) => {
-            println!("🔴 Argus daemon starting...");
+            println!("[*] Argus daemon starting...");
             // Vault-first, env var fallback (vault unavailable in Docker/Linux)
             let api_key = vault.as_ref()
                 .and_then(|v| v.retrieve("openrouter_api_key").ok())
@@ -190,13 +191,43 @@ async fn main() -> anyhow::Result<()> {
             {
                 config.brave_search_key = Some(brave_key);
             }
+
+            // Load Supabase credentials (optional — check-in loop degrades gracefully)
+            let supabase_url = vault.as_ref()
+                .and_then(|v| v.retrieve("supabase_argus_url").ok())
+                .or_else(|| std::env::var("SUPABASE_ARGUS_URL").ok());
+            let supabase_key = vault.as_ref()
+                .and_then(|v| v.retrieve("supabase_argus_service_key").ok())
+                .or_else(|| std::env::var("SUPABASE_ARGUS_SERVICE_KEY").ok());
+
             let bot_token = vault.as_ref()
                 .and_then(|v| v.retrieve("telegram_bot_token").ok())
                 .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok());
+
+            // Telegram chat ID for check-in messages (Bradlee's chat)
+            let checkin_chat_id: Option<i64> = vault.as_ref()
+                .and_then(|v| v.retrieve("telegram_chat_id").ok())
+                .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
+                .and_then(|s| s.parse().ok());
+
+            // Spawn check-in loop if Supabase + Telegram are both configured
+            if let (Some(url), Some(key), Some(token), Some(chat_id)) = (
+                supabase_url,
+                supabase_key,
+                bot_token.clone(),
+                checkin_chat_id,
+            ) {
+                let supabase = argus_core::supabase::SupabaseClient::new(url, key);
+                checkin::spawn_checkin_loop(supabase, token, chat_id);
+                println!("[+] Check-in loop started");
+            } else {
+                println!("[!] Check-in loop disabled (needs supabase_argus_url, supabase_argus_service_key, telegram_bot_token, telegram_chat_id in vault)");
+            }
+
             match bot_token {
                 Some(token) => {
-                    println!("✓ Telegram bot enabled");
-                    println!("✓ Daemon running (Ctrl+C to stop)");
+                    println!("[+] Telegram bot enabled");
+                    println!("[+] Daemon running (Ctrl+C to stop)");
                     println!("Argus Telegram bot starting...");
                     telegram::run_telegram_bot(token, config).await;
                 }

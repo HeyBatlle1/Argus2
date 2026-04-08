@@ -2,11 +2,10 @@
 
 use teloxide::prelude::*;
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 use argus_memory::sqlite::SqliteMemory;
-use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy, MODEL_HAIKU, MODEL_GROK};
+use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy, MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK, model_label};
 
 struct ArgusBot {
     config: AgentConfig,
@@ -14,7 +13,6 @@ struct ArgusBot {
     memory: SqliteMemory,
     mcp: argus_core::mcp::McpClient,
     shell_policy: ShellPolicy,
-    histories: HashMap<i64, Vec<ConversationMessage>>,
 }
 
 impl ArgusBot {
@@ -22,23 +20,12 @@ impl ArgusBot {
         let mut mcp = argus_core::mcp::McpClient::new();
         let _ = mcp.connect_all();
 
-        let mut shell_policy = ShellPolicy::empty();
-        for cmd in &[
-            "ls", "cat", "head", "tail", "grep", "find", "wc", "echo", "pwd",
-            "date", "whoami", "uname", "df", "du", "ps", "which", "file",
-            "stat", "sort", "uniq", "tr", "cut", "awk", "sed",
-            "curl", "wget", "git", "cargo", "python3", "node", "npm", "pip",
-        ] {
-            shell_policy.allow(cmd);
-        }
-
         Self {
             config,
             client: reqwest::Client::new(),
             memory: SqliteMemory::open_default().expect("failed to open memory db"),
             mcp,
-            shell_policy,
-            histories: HashMap::new(),
+            shell_policy: ShellPolicy::default(),
         }
     }
 
@@ -47,30 +34,28 @@ impl ArgusBot {
         match parts[0] {
             "/model" => {
                 if parts.len() == 1 {
-                    // Show current + options
-                    let label = if self.config.model == MODEL_HAIKU { "haiku" } else { "grok" };
                     Some(format!(
-                        "Current model: {} ({})\n\nAvailable:\n  haiku — {}\n  grok  — {}\n\nSwitch with /model haiku or /model grok",
-                        label, self.config.model, MODEL_HAIKU, MODEL_GROK
+                        "Current model: {} ({})\n\nAvailable:\n  haiku  — {}\n  sonnet — {}\n  opus   — {}\n  grok   — {}\n\nSwitch with /model haiku, /model sonnet, /model opus, or /model grok",
+                        model_label(&self.config.model), self.config.model,
+                        MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK
                     ))
                 } else {
                     match self.config.set_model(parts[1].trim()) {
-                        Ok(id) => Some(format!("Switched to: {}", id)),
+                        Ok(id) => Some(format!("Switched to: {} ({})", model_label(id), id)),
                         Err(e) => Some(e),
                     }
                 }
             }
             "/toggle" => {
                 let new_model = self.config.toggle_model().to_string();
-                let label = if new_model == MODEL_HAIKU { "haiku" } else { "grok" };
-                Some(format!("Switched to {} ({})", label, new_model))
+                Some(format!("Switched to {} ({})", model_label(&new_model), new_model))
             }
             _ => None,
         }
     }
 
     async fn process_message(&mut self, chat_id: i64, user_msg: &str) -> String {
-        let history_snapshot = self.histories.entry(chat_id).or_default().clone();
+        let mut history = self.memory.load_history(chat_id).unwrap_or_default();
 
         let mut response_text = String::new();
         let mut tool_log = Vec::new();
@@ -78,7 +63,7 @@ impl ArgusBot {
         let result = argus_core::run_agent_turn(
             &self.config,
             user_msg,
-            &history_snapshot,
+            &history,
             &self.shell_policy,
             &self.memory,
             &mut self.mcp,
@@ -100,15 +85,11 @@ impl ArgusBot {
             }
         }
 
-        let history = self.histories.entry(chat_id).or_default();
         history.push(ConversationMessage { role: "user".to_string(), content: user_msg.to_string() });
         if !response_text.is_empty() {
             history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
         }
-        if history.len() > 40 {
-            let drain_to = history.len() - 40;
-            history.drain(0..drain_to);
-        }
+        let _ = self.memory.save_history(chat_id, &history);
 
         if !tool_log.is_empty() {
             format!("{}\n\n{}", tool_log.join("\n"), response_text)
