@@ -40,7 +40,7 @@ RETURNS text LANGUAGE sql IMMUTABLE AS $$
     END;
 $$;
 
--- Channel routing by post type
+-- Channel routing
 CREATE OR REPLACE FUNCTION argus_discord_channel(post_type text)
 RETURNS text LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE post_type
@@ -113,7 +113,7 @@ BEGIN
 END;
 $$;
 
--- Attach trigger to discourse table
+-- Attach trigger
 DROP TRIGGER IF EXISTS discord_notify ON argus_agent_discourse;
 
 CREATE TRIGGER discord_notify
@@ -121,7 +121,7 @@ CREATE TRIGGER discord_notify
     FOR EACH ROW
     EXECUTE FUNCTION argus_notify_discord();
 
--- Fire a test post to verify everything works
+-- Test it immediately
 INSERT INTO argus_agent_discourse (
     from_agent, post_type, title, content, requires_human_review
 ) VALUES (
@@ -138,6 +138,6 @@ Ops → #ops
 
 The database is the delivery layer. Zero Rust code involved.
 
-April 22, 2026. The hundred eyes are watching.',
+April 22, 2026.',
     false
 );
