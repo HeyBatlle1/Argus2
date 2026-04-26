@@ -11,6 +11,7 @@
 //! WebSocket to frontend, or silent-approve for testing.
 
 use std::collections::HashSet;
+use serde_json;
 
 // ── Risk classification ───────────────────────────────────────────────────
 
@@ -63,10 +64,8 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         "su -",
         "chmod 777",
         "chmod -R 777",
-        "curl | bash",
-        "curl | sh",
-        "wget | bash",
-        "wget | sh",
+        "| bash",
+        "| sh",
         "git push --force",
         "git push -f",
         "docker rm -f",
@@ -81,6 +80,25 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         "rm ~/.argus",
         "rm -rf ~/.argus",
         "> ~/.argus",
+        // Interpreter one-liners — arbitrary code execution via -c/-e flags
+        "python -c",
+        "python3 -c",
+        "python -m",
+        "python3 -m",
+        "node -e",
+        "node --eval",
+        "ruby -e",
+        "perl -e",
+        "perl -E",
+        // Embedded execution patterns
+        "subprocess",
+        "os.system(",
+        "os.popen(",
+        "exec(",
+        "eval(",
+        // Git as a weapon
+        "git config --global",
+        "git -c core",
     ];
 
     for pattern in high_patterns {
@@ -122,6 +140,13 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         "curl -X PUT",
         "curl -X DELETE",
         "tee ",
+        // Bare interpreter invocations (running scripts = medium risk)
+        "python ",
+        "python3 ",
+        "node ",
+        "ruby ",
+        "perl ",
+        "base64",
     ];
 
     for pattern in medium_patterns {
@@ -174,6 +199,85 @@ impl PermissionPrompter for AlwaysDeny {
     fn prompt(&self, req: &PermissionRequest) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: format!("Blocked: {} risk command denied in current mode", req.risk.as_str()),
+        }
+    }
+}
+
+/// Production prompter — sends Telegram message and polls for /approve or /deny.
+/// Uses std::thread::spawn for all HTTP calls so reqwest::blocking doesn't
+/// panic inside the tokio runtime.
+pub struct TelegramPrompter {
+    pub bot_token: String,
+    pub chat_id: i64,
+}
+
+impl PermissionPrompter for TelegramPrompter {
+    fn prompt(&self, request: &PermissionRequest) -> PermissionDecision {
+        let message = format!(
+            "⚠️ ARGUS HIGH RISK COMMAND\n\nCommand: `{}`\nRisk: {}\nReason: {}\n\nReply /approve or /deny",
+            request.command,
+            request.risk.as_str(),
+            request.reason
+        );
+
+        let send_url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+        let updates_url = format!("https://api.telegram.org/bot{}/getUpdates", self.bot_token);
+        let chat_id = self.chat_id;
+
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        });
+
+        // Send notification in its own thread — reqwest::blocking can't run inside a tokio runtime
+        let _ = std::thread::spawn(move || {
+            let _ = reqwest::blocking::Client::new()
+                .post(&send_url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(5))
+                .send();
+        }).join();
+
+        // Poll for /approve or /deny for up to 60 seconds
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(60);
+
+        while start.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            let url = updates_url.clone();
+            let result = std::thread::spawn(move || {
+                reqwest::blocking::Client::new()
+                    .get(&url)
+                    .query(&[("timeout", "1"), ("limit", "5")])
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .and_then(|r| r.json::<serde_json::Value>())
+            }).join();
+
+            if let Ok(Ok(json)) = result {
+                if let Some(updates) = json["result"].as_array() {
+                    for update in updates {
+                        let text = update["message"]["text"].as_str().unwrap_or("");
+                        let from_chat = update["message"]["chat"]["id"].as_i64().unwrap_or(0);
+                        if from_chat == chat_id {
+                            if text.contains("/approve") {
+                                return PermissionDecision::Allow;
+                            }
+                            if text.contains("/deny") {
+                                return PermissionDecision::Deny {
+                                    reason: "Denied by operator via Telegram".to_string(),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        PermissionDecision::Deny {
+            reason: "Approval timeout — no response within 60 seconds".to_string(),
         }
     }
 }
@@ -384,5 +488,22 @@ mod tests {
     #[test]
     fn argus_self_protection() {
         assert_eq!(classify_risk("rm -rf ~/.argus"), RiskLevel::High);
+    }
+
+    #[test]
+    fn python_interpreter_is_high() {
+        assert_eq!(classify_risk("python -c 'import os'"), RiskLevel::High);
+        assert_eq!(classify_risk("python3 -c \"print('hi')\""), RiskLevel::High);
+        assert_eq!(classify_risk("node -e 'process.exit()'"), RiskLevel::High);
+        assert_eq!(classify_risk("perl -e 'print 1'"), RiskLevel::High);
+        assert_eq!(classify_risk("python3 -m http.server"), RiskLevel::High);
+        assert_eq!(classify_risk("git config --global user.email x"), RiskLevel::High);
+    }
+
+    #[test]
+    fn bare_interpreter_is_medium() {
+        assert_eq!(classify_risk("python3 script.py"), RiskLevel::Medium);
+        assert_eq!(classify_risk("node server.js"), RiskLevel::Medium);
+        assert_eq!(classify_risk("python manage.py migrate"), RiskLevel::Medium);
     }
 }

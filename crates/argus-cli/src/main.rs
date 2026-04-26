@@ -210,19 +210,34 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
                 .and_then(|s| s.parse().ok());
 
-            // Spawn check-in loop if Supabase + Telegram are both configured
-            if let (Some(url), Some(key), Some(token), Some(chat_id)) = (
-                supabase_url,
-                supabase_key,
-                bot_token.clone(),
-                checkin_chat_id,
-            ) {
+            // Spawn check-in loop + build EmbeddingClient if Supabase is configured
+            let embedding_client = if let (Some(url), Some(key)) = (supabase_url, supabase_key) {
                 let supabase = argus_core::supabase::SupabaseClient::new(url, key);
-                checkin::spawn_checkin_loop(supabase, token, chat_id);
-                println!("[+] Check-in loop started");
+                if let (Some(token), Some(chat_id)) = (bot_token.clone(), checkin_chat_id) {
+                    checkin::spawn_checkin_loop(supabase.clone(), token, chat_id);
+                    println!("[+] Check-in loop started");
+                }
+                let ec = argus_core::EmbeddingClient::new(&config.api_key, supabase);
+                println!("[+] Semantic memory enabled (768-dim pgvector)");
+                Some(ec)
             } else {
-                println!("[!] Check-in loop disabled (needs supabase_argus_url, supabase_argus_service_key, telegram_bot_token, telegram_chat_id in vault)");
-            }
+                println!("[!] Supabase not configured — check-in loop and semantic memory disabled");
+                None
+            };
+            config.embedding = embedding_client;
+
+            // Wire shell prompter — HIGH risk commands require Telegram approval
+            config.shell_prompter = match (bot_token.clone(), checkin_chat_id) {
+                (Some(token), Some(chat_id)) => {
+                    let prompter = argus_core::shell::TelegramPrompter { bot_token: token, chat_id };
+                    println!("[+] Shell prompter enabled (Telegram approval for HIGH risk)");
+                    Some(std::sync::Arc::new(prompter))
+                }
+                _ => {
+                    println!("[!] Shell prompter disabled — HIGH risk commands will be blocked");
+                    None
+                }
+            };
 
             match bot_token {
                 Some(token) => {

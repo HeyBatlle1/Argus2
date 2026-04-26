@@ -9,7 +9,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "blocking"] }
 urlencoding = "2.1"
+url = "2"
 dirs = "5.0"
 chrono = { version = "0.4", features = ["clock"] }

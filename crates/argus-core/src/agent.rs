@@ -3,6 +3,9 @@
 use crate::mcp::McpClient;
 use crate::shell::ShellPolicy;
 use crate::tools::{self, MemoryBackend};
+use crate::embedding::EmbeddingClient;
+use crate::shell::PermissionPrompter;
+use std::sync::Arc;
 use serde_json::Value;
 
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -39,12 +42,22 @@ ON IDENTITY:
 
 The hundred eyes are open. What needs doing?"#;
 
-fn build_system_prompt() -> String {
+/// Build system prompt with current date.
+/// If semantic_context is provided, inject it as a pre-loaded context block.
+/// The agent experiences this as "things I already know" — not as a retrieval.
+fn build_system_prompt(semantic_context: Option<&str>) -> String {
     let now = chrono::Utc::now();
     let date_str = now.format("%A, %B %d, %Y").to_string();
-    format!("{}\n\nCURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
+
+    let base = format!(
+        "{}\n\nCURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
         SYSTEM_PROMPT_BASE, date_str
-    )
+    );
+
+    match semantic_context {
+        Some(ctx) if !ctx.is_empty() => format!("{}\n\n{}", base, ctx),
+        _ => base,
+    }
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values.
@@ -84,13 +97,15 @@ pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
 pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-5";
 pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-5";
 pub const MODEL_GROK:   &str = "x-ai/grok-3-mini-beta";
+pub const MODEL_GEMINI: &str = "google/gemini-2.0-flash-preview";
 
 pub fn model_label(model_id: &str) -> &'static str {
     match model_id {
-        MODEL_HAIKU  => "Haiku  (fast / cheap)",
-        MODEL_SONNET => "Sonnet (balanced)",
-        MODEL_OPUS   => "Opus   (max intelligence)",
-        MODEL_GROK   => "Grok   (alternative)",
+        MODEL_HAIKU  => "Haiku   (fast / cheap)",
+        MODEL_SONNET => "Sonnet  (balanced)",
+        MODEL_OPUS   => "Opus    (max intelligence)",
+        MODEL_GROK   => "Grok    (default)",
+        MODEL_GEMINI => "Gemini  (Google Flash)",
         _            => "Unknown model",
     }
 }
@@ -101,6 +116,10 @@ pub struct AgentConfig {
     pub api_url: String,
     pub temperature: f64,
     pub brave_search_key: Option<String>,
+    /// Optional embedding client — when set, semantic pre-fetch runs before each turn
+    pub embedding: Option<EmbeddingClient>,
+    /// Optional shell prompter — when set, HIGH risk commands are sent to Telegram for approval
+    pub shell_prompter: Option<Arc<dyn PermissionPrompter>>,
 }
 
 impl AgentConfig {
@@ -112,11 +131,18 @@ impl AgentConfig {
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
             brave_search_key,
+            embedding: None,
+            shell_prompter: None,
         }
     }
 
     pub fn with_brave_key(mut self, key: impl Into<String>) -> Self {
         self.brave_search_key = Some(key.into());
+        self
+    }
+
+    pub fn with_embedding(mut self, client: EmbeddingClient) -> Self {
+        self.embedding = Some(client);
         self
     }
 
@@ -136,8 +162,9 @@ impl AgentConfig {
             "sonnet" | MODEL_SONNET => MODEL_SONNET.to_string(),
             "opus"   | MODEL_OPUS   => MODEL_OPUS.to_string(),
             "grok"   | MODEL_GROK   => MODEL_GROK.to_string(),
+            "gemini" | MODEL_GEMINI => MODEL_GEMINI.to_string(),
             other => return Err(format!(
-                "Unknown model '{}'. Use: haiku, sonnet, opus, grok", other
+                "Unknown model '{}'. Use: haiku, sonnet, opus, grok, gemini", other
             )),
         };
         Ok(&self.model)
@@ -148,6 +175,9 @@ impl AgentConfig {
     }
 }
 
+/// Core agent turn. Accepts optional pre-fetched semantic context.
+/// The semantic context is injected into the system prompt transparently —
+/// the agent experiences relevant memories as things it "already knows."
 pub async fn run_agent_turn<F>(
     config: &AgentConfig,
     user_message: &str,
@@ -163,13 +193,31 @@ where
 {
     on_event(AgentEvent::Thinking);
 
+    // ── Semantic pre-fetch ─────────────────────────────────────────────────
+    // If an embedding client is configured, search all three semantic surfaces
+    // (memories, discourse, conversations) before the LLM call.
+    // Results are injected into the system prompt — no explicit recall needed.
+    let semantic_context = if let Some(ref emb) = config.embedding {
+        match emb.search_all(user_message, 5, 5, 3).await {
+            Ok(results) => {
+                eprintln!("[semantic] {} results found for query", results.len());
+                EmbeddingClient::format_context_block(&results)
+            }
+            Err(e) => {
+                eprintln!("[semantic] search failed (continuing without): {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut tool_schemas: Vec<Value> = Vec::new();
     let mut registered_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // MCP tools first — namespace collisions by prefixing with server name
+    // MCP tools first
     for mcp_tool in mcp.all_tools() {
         let raw_name = sanitize_tool_name(&mcp_tool.name);
-
         let safe_name = if registered_names.contains(&raw_name) {
             let prefix = sanitize_tool_name(
                 &mcp_tool.server_name.replace('-', "_").replace(' ', "_")
@@ -195,7 +243,7 @@ where
         }));
     }
 
-    // Built-in tools — skip any already registered by MCP
+    // Built-in tools
     for schema in tools::builtin_tool_schemas() {
         let name = match schema["function"]["name"].as_str() {
             Some(n) if !n.is_empty() => n.to_string(),
@@ -207,7 +255,7 @@ where
         }
     }
 
-    // Final safety dedup — absolute guarantee before API call
+    // Final dedup guarantee
     {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         tool_schemas.retain(|s| {
@@ -216,7 +264,8 @@ where
         });
     }
 
-    let system_prompt = build_system_prompt();
+    // System prompt with semantic context injected
+    let system_prompt = build_system_prompt(semantic_context.as_deref());
 
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": system_prompt}),
@@ -298,14 +347,13 @@ where
             });
 
             let result = if let Some(output) =
-                tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref()).await
+                tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref(), config.shell_prompter.as_deref()).await
             {
                 output
             } else {
                 match mcp.call_tool(name, args.clone()) {
                     Ok(output) => output,
                     Err(_) => {
-                        // Strip server prefix and retry (e.g. "server_toolname" -> "toolname")
                         let short = name.splitn(2, '_').last().unwrap_or(name);
                         match mcp.call_tool(short, args) {
                             Ok(output) => output,

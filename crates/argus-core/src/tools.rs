@@ -2,7 +2,7 @@
 //!
 //! All built-in tools live here. Shared across TUI, Telegram, and any future frontends.
 
-use crate::shell::{self, ShellPolicy};
+use crate::shell::{self, ShellPolicy, PermissionPrompter};
 use serde_json::Value;
 
 const MAX_FILE_CHARS: usize = 8_000;
@@ -171,12 +171,13 @@ pub async fn execute_builtin(
     memory: &dyn MemoryBackend,
     http_client: &reqwest::Client,
     brave_search_key: Option<&str>,
+    shell_prompter: Option<&dyn PermissionPrompter>,
 ) -> Option<String> {
     match name {
         "read_file"      => Some(tool_read_file(args)),
         "list_directory" => Some(tool_list_directory(args)),
         "write_file"     => Some(tool_write_file(args)),
-        "shell"          => Some(tool_shell(args, shell_policy).await),
+        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter).await),
         "web_search"     => Some(tool_web_search(args, http_client, brave_search_key).await),
         "remember"       => Some(tool_remember(args, memory)),
         "recall"         => Some(tool_recall(args, memory)),
@@ -269,9 +270,9 @@ fn tool_write_file(args: &Value) -> String {
     }
 }
 
-async fn tool_shell(args: &Value, policy: &ShellPolicy) -> String {
+async fn tool_shell(args: &Value, policy: &ShellPolicy, prompter: Option<&dyn PermissionPrompter>) -> String {
     let command = args["command"].as_str().unwrap_or("");
-    match shell::execute_shell(policy, command, None).await {
+    match shell::execute_shell(policy, command, prompter).await {
         Ok((output, _risk)) => output,
         Err(e) => format!("Shell error: {}", e),
     }
@@ -381,9 +382,64 @@ fn tool_forget(args: &Value, memory: &dyn MemoryBackend) -> String {
     }
 }
 
+/// Validate a URL against the egress policy.
+/// Blocks SSRF vectors, private networks, cloud metadata endpoints, and non-HTTP schemes.
+fn validate_egress_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid URL: {}", e))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Blocked scheme '{}' — only http/https allowed", scheme)),
+    }
+
+    let host = parsed.host_str().unwrap_or("").to_lowercase();
+
+    if host.is_empty() {
+        return Err("No host in URL".to_string());
+    }
+
+    // Cloud metadata endpoints
+    if host == "169.254.169.254" || host == "metadata.google.internal" {
+        return Err("Blocked: cloud metadata endpoint".to_string());
+    }
+
+    // Loopback
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return Err("Blocked: loopback address".to_string());
+    }
+
+    // RFC 1918 private ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                if o[0] == 10
+                    || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+                    || (o[0] == 192 && o[1] == 168)
+                    || o[0] == 127
+                {
+                    return Err(format!("Blocked: RFC 1918 private address {}", ip));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return Err(format!("Blocked: private IPv6 address {}", ip));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
     let url = args["url"].as_str().unwrap_or("");
     if url.is_empty() { return "No URL provided".to_string(); }
+
+    if let Err(reason) = validate_egress_url(url) {
+        return format!("HTTP request blocked: {}", reason);
+    }
 
     let method = args["method"].as_str().unwrap_or("GET");
     let mut builder = match method {
