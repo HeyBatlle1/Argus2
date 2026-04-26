@@ -6,6 +6,7 @@
 //! Tables served:
 //!   Reads:  argus_checkin_config, argus_schedule, argus_memories
 //!   Writes: argus_checkin_log, argus_agent_discourse, argus_conversations, argus_memories
+//!   RPC:    search_all_semantic (pgvector similarity search)
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -77,8 +78,11 @@ impl SupabaseClient {
         format!("{}/rest/v1/{}", self.base_url, table)
     }
 
+    fn rpc_url(&self, function: &str) -> String {
+        format!("{}/rest/v1/rpc/{}", self.base_url, function)
+    }
+
     /// GET /rest/v1/{table}?{query_params}
-    /// Example: select("argus_checkin_config", "select=*&limit=1")
     pub async fn select(&self, table: &str, query: &str) -> Result<Value, String> {
         let url = if query.is_empty() {
             format!("{}?select=*", self.rest_url(table))
@@ -128,10 +132,32 @@ impl SupabaseClient {
         Ok(())
     }
 
+    /// POST /rest/v1/rpc/{function} — call a Postgres function
+    /// Used for pgvector similarity search (search_all_semantic, etc.)
+    pub async fn rpc(&self, function: &str, params: &Value) -> Result<Value, String> {
+        let resp = self.client
+            .post(&self.rpc_url(function))
+            .header("Authorization", format!("Bearer {}", self.jwt))
+            .header("apikey", &self.jwt)
+            .header("Content-Type", "application/json")
+            .json(params)
+            .send()
+            .await
+            .map_err(|e| format!("Supabase RPC {} failed: {}", function, e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Supabase RPC {} error {}: {}", function, status, body));
+        }
+
+        resp.json::<Value>()
+            .await
+            .map_err(|e| format!("Supabase RPC response parse error: {}", e))
+    }
+
     // ── Domain helpers ─────────────────────────────────────────────────────
 
-    /// Read the first row of argus_checkin_config.
-    /// Falls back to defaults if table is empty or request fails.
     pub async fn read_checkin_config(&self) -> CheckinConfig {
         match self.select("argus_checkin_config", "select=*&limit=1").await {
             Err(e) => {
@@ -148,21 +174,18 @@ impl SupabaseClient {
         }
     }
 
-    /// Write a completed check-in to argus_checkin_log.
     pub async fn write_checkin_log(&self, entry: &CheckinLogEntry) -> Result<(), String> {
         let data = serde_json::to_value(entry)
             .map_err(|e| format!("Serialize error: {}", e))?;
         self.insert("argus_checkin_log", &data).await
     }
 
-    /// Write a discourse post to argus_agent_discourse.
     pub async fn write_discourse(&self, post: &DiscoursePost) -> Result<(), String> {
         let data = serde_json::to_value(post)
             .map_err(|e| format!("Serialize error: {}", e))?;
         self.insert("argus_agent_discourse", &data).await
     }
 
-    /// Read upcoming argus_schedule entries (next 7 days).
     pub async fn read_upcoming_schedule(&self) -> Result<Value, String> {
         self.select(
             "argus_schedule",
@@ -171,7 +194,6 @@ impl SupabaseClient {
         .await
     }
 
-    /// Read recent argus_memories.
     pub async fn read_recent_memories(&self, limit: usize) -> Result<Value, String> {
         self.select(
             "argus_memories",
