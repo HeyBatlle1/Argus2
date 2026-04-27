@@ -43,21 +43,30 @@ ON IDENTITY:
 The hundred eyes are open. What needs doing?"#;
 
 /// Build system prompt with current date.
-/// If semantic_context is provided, inject it as a pre-loaded context block.
-/// The agent experiences this as "things I already know" — not as a retrieval.
-fn build_system_prompt(semantic_context: Option<&str>) -> String {
+/// Injects semantic context (memories/discourse/convs) and intranet dispatch
+/// transparently — the agent experiences these as things it "already knows."
+fn build_system_prompt(semantic_context: Option<&str>, discourse_context: Option<&str>) -> String {
     let now = chrono::Utc::now();
     let date_str = now.format("%A, %B %d, %Y").to_string();
 
-    let base = format!(
+    let mut prompt = format!(
         "{}\n\nCURRENT DATE: {} UTC. Use this for all time-sensitive queries and searches.",
         SYSTEM_PROMPT_BASE, date_str
     );
 
-    match semantic_context {
-        Some(ctx) if !ctx.is_empty() => format!("{}\n\n{}", base, ctx),
-        _ => base,
+    if let Some(ctx) = semantic_context {
+        if !ctx.is_empty() {
+            prompt = format!("{}\n\n{}", prompt, ctx);
+        }
     }
+
+    if let Some(disc) = discourse_context {
+        if !disc.is_empty() {
+            prompt = format!("{}\n\n{}", prompt, disc);
+        }
+    }
+
+    prompt
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values.
@@ -93,18 +102,18 @@ pub struct ConversationMessage {
 }
 
 // ── Model constants ────────────────────────────────────────────────────────
-pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
-pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-5";
-pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-5";
-pub const MODEL_GROK:   &str = "x-ai/grok-3-mini-beta";
-pub const MODEL_GEMINI: &str = "google/gemini-2.0-flash-preview";
+pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5-20251001";
+pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-6";
+pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-7";
+pub const MODEL_GROK:   &str = "x-ai/grok-4.1-fast";
+pub const MODEL_GEMINI: &str = "google/gemini-3.1-flash-image-preview";
 
 pub fn model_label(model_id: &str) -> &'static str {
     match model_id {
         MODEL_HAIKU  => "Haiku   (fast / cheap)",
         MODEL_SONNET => "Sonnet  (balanced)",
         MODEL_OPUS   => "Opus    (max intelligence)",
-        MODEL_GROK   => "Grok    (default)",
+        MODEL_GROK   => "Grok    (fast / default)",
         MODEL_GEMINI => "Gemini  (Google Flash)",
         _            => "Unknown model",
     }
@@ -127,7 +136,7 @@ impl AgentConfig {
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
-            model: MODEL_HAIKU.to_string(),
+            model: MODEL_GROK.to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
             brave_search_key,
@@ -193,23 +202,43 @@ where
 {
     on_event(AgentEvent::Thinking);
 
-    // ── Semantic pre-fetch ─────────────────────────────────────────────────
-    // If an embedding client is configured, search all three semantic surfaces
-    // (memories, discourse, conversations) before the LLM call.
-    // Results are injected into the system prompt — no explicit recall needed.
-    let semantic_context = if let Some(ref emb) = config.embedding {
-        match emb.search_all(user_message, 5, 5, 3).await {
-            Ok(results) => {
-                eprintln!("[semantic] {} results found for query", results.len());
-                EmbeddingClient::format_context_block(&results)
+    // ── Semantic pre-fetch + intranet dispatch ────────────────────────────
+    // If an embedding client is configured:
+    //   1. Semantic search across memories / discourse / conversations
+    //   2. Read recent intranet posts from other agents
+    // Both are injected into the system prompt before the LLM call.
+    // Skip semantic pre-fetch for very short messages — they produce noisy vectors.
+    let should_prefetch = user_message.split_whitespace().count() > 4;
+    let (semantic_context, discourse_context) = if let Some(ref emb) = config.embedding {
+        let sem = if should_prefetch {
+            match emb.search_all(user_message, 5, 5, 3).await {
+                Ok(results) => {
+                    eprintln!("[semantic] {} results found for query", results.len());
+                    EmbeddingClient::format_context_block(&results)
+                }
+                Err(e) => {
+                    eprintln!("[semantic] search failed (continuing without): {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let disc = match emb.read_recent_discourse(8, &config.model).await {
+            Ok(posts) => {
+                eprintln!("[intranet] {} posts loaded", posts.len());
+                EmbeddingClient::format_discourse_block(&posts)
             }
             Err(e) => {
-                eprintln!("[semantic] search failed (continuing without): {}", e);
+                eprintln!("[intranet] read failed (continuing without): {}", e);
                 None
             }
-        }
+        };
+
+        (sem, disc)
     } else {
-        None
+        (None, None)
     };
 
     let mut tool_schemas: Vec<Value> = Vec::new();
@@ -265,7 +294,7 @@ where
     }
 
     // System prompt with semantic context injected
-    let system_prompt = build_system_prompt(semantic_context.as_deref());
+    let system_prompt = build_system_prompt(semantic_context.as_deref(), discourse_context.as_deref());
 
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": system_prompt}),

@@ -177,7 +177,7 @@ pub async fn execute_builtin(
         "read_file"      => Some(tool_read_file(args)),
         "list_directory" => Some(tool_list_directory(args)),
         "write_file"     => Some(tool_write_file(args)),
-        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter).await),
+        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter, http_client).await),
         "web_search"     => Some(tool_web_search(args, http_client, brave_search_key).await),
         "remember"       => Some(tool_remember(args, memory)),
         "recall"         => Some(tool_recall(args, memory)),
@@ -261,20 +261,114 @@ fn tool_list_directory(args: &Value) -> String {
     }
 }
 
+/// Validate a write path against the allowlist/blocklist policy.
+/// Called before every write_file to prevent the agent from touching
+/// vault files, SSH keys, shell configs, or system directories.
+fn validate_write_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("No path provided".to_string());
+    }
+
+    let p = std::path::Path::new(path);
+    // Resolve to absolute; if the file doesn't exist yet use the parent dir
+    let canonical = p.canonicalize()
+        .or_else(|_| p.parent().and_then(|par| par.canonicalize().ok().map(|c| c.join(p.file_name().unwrap_or_default())))
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve path")))
+        .unwrap_or_else(|_| p.to_path_buf());
+
+    let s = canonical.to_string_lossy().to_lowercase();
+
+    // Hard-blocked path fragments — never writable regardless of prefix
+    let blocked: &[&str] = &[
+        ".argus/vault",
+        ".ssh/",
+        "authorized_keys",
+        ".zshrc",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        "/etc/",
+        "/sys/",
+        "/proc/",
+        "/dev/",
+        "/boot/",
+        "/sbin/",
+        "/usr/bin/",
+        "/usr/sbin/",
+    ];
+
+    for fragment in blocked {
+        if s.contains(fragment) {
+            return Err(format!("Write blocked: '{}' matches protected path pattern '{}'", path, fragment));
+        }
+    }
+
+    Ok(())
+}
+
 fn tool_write_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     let content = args["content"].as_str().unwrap_or("");
+
+    if let Err(reason) = validate_write_path(path) {
+        return format!("Write blocked: {}", reason);
+    }
+
     match std::fs::write(path, content) {
         Ok(_) => format!("Written {} bytes to {}", content.len(), path),
         Err(e) => format!("Error writing file: {}", e),
     }
 }
 
-async fn tool_shell(args: &Value, policy: &ShellPolicy, prompter: Option<&dyn PermissionPrompter>) -> String {
+async fn tool_shell(
+    args: &Value,
+    policy: &ShellPolicy,
+    prompter: Option<&dyn PermissionPrompter>,
+    http_client: &reqwest::Client,
+) -> String {
     let command = args["command"].as_str().unwrap_or("");
-    match shell::execute_shell(policy, command, prompter).await {
-        Ok((output, _risk)) => output,
-        Err(e) => format!("Shell error: {}", e),
+    if command.is_empty() {
+        return "No command provided".to_string();
+    }
+
+    // Risk classification and operator approval (Telegram prompt for HIGH risk)
+    if let Err(e) = policy.authorize(command, prompter) {
+        return format!("Shell blocked: {}", e);
+    }
+
+    // Route execution to argus-workspace via internal Docker network
+    let payload = serde_json::json!({ "command": command });
+    let resp = http_client
+        .post("http://argus-workspace:9001/exec")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(35))
+        .send()
+        .await;
+
+    match resp {
+        Err(e) => format!("Workspace unreachable: {}", e),
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Err(e) => format!("Workspace response error: {}", e),
+            Ok(json) => {
+                let stdout    = json["stdout"].as_str().unwrap_or("");
+                let stderr    = json["stderr"].as_str().unwrap_or("");
+                let exit_code = json["exit_code"].as_i64().unwrap_or(-1);
+
+                if exit_code == 0 {
+                    let max = policy.max_output_bytes;
+                    if stdout.len() > max {
+                        let end = (0..=max).rev()
+                            .find(|&i| stdout.is_char_boundary(i))
+                            .unwrap_or(0);
+                        format!("{}...\n[truncated — {} bytes total]", &stdout[..end], stdout.len())
+                    } else {
+                        stdout.to_string()
+                    }
+                } else {
+                    format!("Exit {}: {}", exit_code, stderr.trim())
+                }
+            }
+        }
     }
 }
 

@@ -9,5 +9,5 @@ pub use agent::{AgentConfig, AgentEvent, ConversationMessage, run_agent_turn, MO
 pub use embedding::{EmbeddingClient, SemanticResult, EMBEDDING_MODEL};
 pub use mcp::McpClient;
 pub use shell::{ShellPolicy, PermissionPrompter, TelegramPrompter};
-pub use supabase::SupabaseClient;
+pub use supabase::{SupabaseClient, DiscourseRecord};
 pub use tools::{MemoryBackend, MemoryRecord};

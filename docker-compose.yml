@@ -10,6 +10,9 @@ services:
       - ARGUS_DATA_DIR=/argus/data
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - SUPABASE_ARGUS_URL=${SUPABASE_ARGUS_URL:-}
+      - SUPABASE_ARGUS_SERVICE_KEY=${SUPABASE_ARGUS_SERVICE_KEY:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
     ports:
       - "8888:8888"
       - "9000:9000"
@@ -56,6 +59,9 @@ services:
     restart: unless-stopped
     volumes:
       - workspace:/workspace
+    # No host port mapping — only reachable by argus-daemon on the internal Docker network
+    expose:
+      - "9001"
     deploy:
       resources:
         limits:

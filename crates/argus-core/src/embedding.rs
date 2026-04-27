@@ -12,7 +12,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::supabase::SupabaseClient;
+use crate::supabase::{SupabaseClient, DiscoursePost, DiscourseRecord};
 
 // ── Embedding model ───────────────────────────────────────────────────────
 
@@ -150,7 +150,7 @@ impl EmbeddingClient {
             "memories_count": memories_count,
             "discourse_count": discourse_count,
             "conversation_count": conversation_count,
-            "min_similarity": 0.45
+            "min_similarity": 0.65
         });
 
         let result = self.supabase.rpc("search_all_semantic", &body).await?;
@@ -166,15 +166,41 @@ impl EmbeddingClient {
         }).collect())
     }
 
+    /// Read recent intranet posts from other agents (last 24h, up to `limit` posts).
+    pub async fn read_recent_discourse(
+        &self,
+        limit: usize,
+        exclude_author: &str,
+    ) -> Result<Vec<DiscourseRecord>, String> {
+        self.supabase.read_recent_discourse(limit, Some(exclude_author)).await
+    }
+
+    /// Post a finding to the intranet. Fires async — never blocks the main turn.
+    pub async fn post_finding(
+        &self,
+        author: &str,
+        content: &str,
+        task_context: Option<String>,
+    ) -> Result<(), String> {
+        let post = DiscoursePost {
+            author: author.to_string(),
+            post_type: "finding".to_string(),
+            content: content.to_string(),
+            task_context,
+            requires_human_review: false,
+        };
+        self.supabase.write_discourse(&post).await
+    }
+
     pub fn format_context_block(results: &[SemanticResult]) -> Option<String> {
         if results.is_empty() { return None; }
 
         let mut lines = vec!["── SEMANTIC CONTEXT (auto-retrieved, most relevant) ──".to_string()];
         for r in results {
             let label = match r.source.as_str() {
-                "memory" => "📍 memory",
-                "discourse" => "💬 intranet",
-                "conversation" => "🗒 past conv",
+                "memory" => "memory",
+                "discourse" => "intranet",
+                "conversation" => "past conv",
                 other => other,
             };
             lines.push(format!(
@@ -184,6 +210,22 @@ impl EmbeddingClient {
             ));
         }
         lines.push("── END SEMANTIC CONTEXT ──".to_string());
+        Some(lines.join("\n\n"))
+    }
+
+    pub fn format_discourse_block(posts: &[DiscourseRecord]) -> Option<String> {
+        if posts.is_empty() { return None; }
+
+        let mut lines = vec!["── INTRANET DISPATCH (recent posts from other agents) ──".to_string()];
+        for p in posts {
+            let when = p.created_at.as_deref().unwrap_or("recently");
+            lines.push(format!(
+                "[{post_type} | {author} | {when}]\n{content}",
+                post_type = p.post_type, author = p.author,
+                when = when, content = p.content,
+            ));
+        }
+        lines.push("── END INTRANET DISPATCH ──".to_string());
         Some(lines.join("\n\n"))
     }
 }

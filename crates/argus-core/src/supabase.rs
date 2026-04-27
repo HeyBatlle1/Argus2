@@ -46,6 +46,15 @@ pub struct DiscoursePost {
     pub requires_human_review: bool,
 }
 
+/// A post read back from argus_agent_discourse
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscourseRecord {
+    pub author: String,
+    pub post_type: String,
+    pub content: String,
+    pub created_at: Option<String>,
+}
+
 // ── Checkin log entry ──────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -200,5 +209,32 @@ impl SupabaseClient {
             &format!("select=*&order=created_at.desc&limit={}", limit),
         )
         .await
+    }
+
+    /// Read recent posts from the intranet, optionally excluding the calling agent.
+    /// Used to inject other agents' findings as context before a turn starts.
+    pub async fn read_recent_discourse(
+        &self,
+        limit: usize,
+        exclude_author: Option<&str>,
+    ) -> Result<Vec<DiscourseRecord>, String> {
+        let query = match exclude_author {
+            Some(author) => format!(
+                "select=author,post_type,content,created_at&author=neq.{}&order=created_at.desc&limit={}",
+                urlencoding::encode(author), limit
+            ),
+            None => format!(
+                "select=author,post_type,content,created_at&order=created_at.desc&limit={}",
+                limit
+            ),
+        };
+
+        let rows = self.select("argus_agent_discourse", &query).await?;
+        let records = rows.as_array()
+            .ok_or("argus_agent_discourse returned non-array")?
+            .iter()
+            .filter_map(|row| serde_json::from_value::<DiscourseRecord>(row.clone()).ok())
+            .collect();
+        Ok(records)
     }
 }
