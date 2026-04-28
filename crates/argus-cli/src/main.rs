@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use argus_crypto::{SecureVault, vault::VaultError};
 use argus_core::AgentConfig;
+use chrono;
 
 const LOGO: &str = r#"
     ___    ____  ______  __  _______
@@ -238,6 +239,83 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             };
+
+            // ── Audit chain ────────────────────────────────────────────────
+            // Open append-only audit DB, verify chain integrity on startup,
+            // then schedule a midnight anchor task to Supabase.
+            let data_dir = std::env::var("ARGUS_DATA_DIR").unwrap_or_else(|_| "/argus/data".to_string());
+            let audit_path = format!("{}/audit.db", data_dir);
+            let audit_arc = match argus_audit::AuditChain::open(&audit_path) {
+                Err(e) => {
+                    eprintln!("[!] Failed to open audit chain: {}", e);
+                    None
+                }
+                Ok(chain) => {
+                    match chain.verify_recent(100) {
+                        Ok(n) => println!("[+] Audit chain verified ({} entries checked)", n),
+                        Err(e) => {
+                            eprintln!("[!] AUDIT CHAIN INTEGRITY FAILURE: {}", e);
+                            // Alert via Telegram if available — fire and forget
+                            if let (Some(ref token), Some(chat_id)) = (bot_token.clone(), checkin_chat_id) {
+                                let token = token.clone();
+                                let msg = format!("[!] ARGUS AUDIT CHAIN INTEGRITY FAILURE\n\n{}", e);
+                                tokio::spawn(async move {
+                                    let _ = reqwest::Client::new()
+                                        .post(format!("https://api.telegram.org/bot{}/sendMessage", token))
+                                        .json(&serde_json::json!({"chat_id": chat_id, "text": msg}))
+                                        .send().await;
+                                });
+                            }
+                        }
+                    }
+
+                    // Log this daemon startup as a system event
+                    let _ = chain.append(&config.model, "system", None,
+                        Some("daemon_startup"), Some("ok"));
+
+                    let chain_arc = std::sync::Arc::new(chain);
+
+                    // Midnight anchor task — runs forever, fires once per day at UTC midnight
+                    let supabase_url_for_anchor = vault.as_ref()
+                        .and_then(|v| v.retrieve("supabase_argus_url").ok())
+                        .or_else(|| std::env::var("SUPABASE_ARGUS_URL").ok());
+                    let supabase_key_for_anchor = vault.as_ref()
+                        .and_then(|v| v.retrieve("supabase_argus_service_key").ok())
+                        .or_else(|| std::env::var("SUPABASE_ARGUS_SERVICE_KEY").ok());
+
+                    if let (Some(url), Some(key), Some(token), Some(chat_id)) = (
+                        supabase_url_for_anchor,
+                        supabase_key_for_anchor,
+                        bot_token.clone(),
+                        checkin_chat_id,
+                    ) {
+                        let anchor_chain = chain_arc.clone();
+                        let signing_key = argus_audit::sha256_hex(&config.api_key)
+                            .into_bytes();
+                        tokio::spawn(async move {
+                            loop {
+                                let now = chrono::Utc::now();
+                                let next_midnight = (now.date_naive() + chrono::Duration::days(1))
+                                    .and_hms_opt(0, 0, 0).unwrap()
+                                    .and_utc();
+                                let secs = (next_midnight - now).num_seconds().max(0) as u64;
+                                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+
+                                if let Err(e) = argus_audit::run_daily_anchor(
+                                    &anchor_chain, &url, &key,
+                                    &signing_key, &token, chat_id,
+                                ).await {
+                                    eprintln!("[!] Daily anchor failed: {}", e);
+                                }
+                            }
+                        });
+                        println!("[+] Daily audit anchor scheduled");
+                    }
+
+                    Some(chain_arc)
+                }
+            };
+            config.audit = audit_arc;
 
             match bot_token {
                 Some(token) => {

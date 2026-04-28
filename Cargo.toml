@@ -6,6 +6,7 @@ members = [
     "crates/argus-sandbox",
     "crates/argus-memory",
     "crates/argus-cli",
+    "crates/argus-audit",
 ]
 
 [workspace.package]

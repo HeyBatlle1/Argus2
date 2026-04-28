@@ -129,6 +129,8 @@ pub struct AgentConfig {
     pub embedding: Option<EmbeddingClient>,
     /// Optional shell prompter — when set, HIGH risk commands are sent to Telegram for approval
     pub shell_prompter: Option<Arc<dyn PermissionPrompter>>,
+    /// Optional audit chain — when set, all tool calls and model calls are cryptographically logged
+    pub audit: Option<Arc<argus_audit::AuditChain>>,
 }
 
 impl AgentConfig {
@@ -142,6 +144,7 @@ impl AgentConfig {
             brave_search_key,
             embedding: None,
             shell_prompter: None,
+            audit: None,
         }
     }
 
@@ -341,6 +344,18 @@ where
                     .as_str()
                     .unwrap_or("(no response)")
                     .to_string();
+
+                // Audit: log this model call (args = model+round fingerprint, result by hash)
+                if let Some(ref audit) = config.audit {
+                    let _ = audit.append(
+                        &config.model,
+                        "model_call",
+                        None,
+                        Some(&format!("model={},round={},finish=text", config.model, _round)),
+                        Some(&content),
+                    );
+                }
+
                 on_event(AgentEvent::Response(content.clone()));
                 return Ok(content);
             }
@@ -368,6 +383,9 @@ where
                 _ => serde_json::to_string(&args).unwrap_or_default(),
             };
 
+            // Capture args as string before any potential move into MCP call
+            let args_str_for_audit = serde_json::to_string(&args).unwrap_or_default();
+
             on_event(AgentEvent::ToolCall {
                 id: tool_call_id.to_string(),
                 name: name.to_string(),
@@ -391,6 +409,17 @@ where
                     }
                 }
             };
+
+            // Audit: cryptographically log this tool call (args and result by hash only)
+            if let Some(ref audit) = config.audit {
+                let _ = audit.append(
+                    &config.model,
+                    "tool_call",
+                    Some(name),
+                    Some(&args_str_for_audit),
+                    Some(&result),
+                );
+            }
 
             let result_preview = {
                 let truncated = truncate_chars(&result, PREVIEW_CHARS);
@@ -443,6 +472,17 @@ where
         .as_str()
         .unwrap_or("I searched but couldn't synthesize a clear answer. Try rephrasing.")
         .to_string();
+
+    // Audit: log the synthesis model call
+    if let Some(ref audit) = config.audit {
+        let _ = audit.append(
+            &config.model,
+            "model_call",
+            None,
+            Some(&format!("model={},round=synthesis,finish=text", config.model)),
+            Some(&content),
+        );
+    }
 
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
