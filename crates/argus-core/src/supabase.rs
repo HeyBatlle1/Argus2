@@ -39,7 +39,7 @@ impl Default for CheckinConfig {
 
 #[derive(Debug, Serialize)]
 pub struct DiscoursePost {
-    pub author: String,
+    pub from_agent: String,
     pub post_type: String,    // "finding" | "question" | "proposal"
     pub content: String,
     pub task_context: Option<String>,
@@ -49,7 +49,7 @@ pub struct DiscoursePost {
 /// A post read back from argus_agent_discourse
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiscourseRecord {
-    pub author: String,
+    pub from_agent: String,
     pub post_type: String,
     pub content: String,
     pub created_at: Option<String>,
@@ -220,11 +220,11 @@ impl SupabaseClient {
     ) -> Result<Vec<DiscourseRecord>, String> {
         let query = match exclude_author {
             Some(author) => format!(
-                "select=author,post_type,content,created_at&author=neq.{}&order=created_at.desc&limit={}",
+                "select=from_agent,post_type,content,created_at&from_agent=neq.{}&order=created_at.desc&limit={}",
                 urlencoding::encode(author), limit
             ),
             None => format!(
-                "select=author,post_type,content,created_at&order=created_at.desc&limit={}",
+                "select=from_agent,post_type,content,created_at&order=created_at.desc&limit={}",
                 limit
             ),
         };

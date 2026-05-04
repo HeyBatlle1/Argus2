@@ -8,6 +8,7 @@ import {
   ServerMessage,
 } from '@/lib/types';
 import { ArgusConnection } from '@/lib/connection';
+import { parseArtifacts } from '@/lib/artifacts';
 import { DEFAULT_TOOLS, WS_URL } from '@/lib/constants';
 import { getModelTier } from '@/lib/models';
 import { RealConnection } from './useWebSocket';
@@ -97,6 +98,10 @@ interface AgentStore {
   partnershipDynamics: PartnershipDynamic[];
   breakthroughs: Breakthrough[];
 
+  // Vault + MCP live state (populated from Connected WS message)
+  vaultKeys: string[];
+  mcpServers: string[];
+
   // Internal
   _ws: ArgusConnection | null;
 
@@ -118,7 +123,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   // Agent state — prod starts watching, dev same
   eyeState: 'watching',
-  activeModel: 'claude-haiku',
+  activeModel: 'grok-fast',
   accessTier: 'royal',
   isStreaming: false,
 
@@ -137,6 +142,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   partnershipDynamics: devData.dynamics,
   breakthroughs: devData.breakthroughs,
 
+  vaultKeys: [],
+  mcpServers: [],
+
   _ws: null,
 
   // ─── Server message handler ────────────────────────────────────────────
@@ -144,7 +152,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   _handleServerMessage: (msg: ServerMessage) => {
     switch (msg.type) {
       case 'connected':
-        set({ connected: true });
+        set({
+          connected: true,
+          vaultKeys: msg.vault_keys ?? [],
+          mcpServers: msg.mcp_servers ?? [],
+        });
         break;
 
       case 'thinking':
@@ -214,15 +226,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         }));
         break;
 
-      case 'response_complete':
+      case 'response_complete': {
+        const { cleanText, artifacts } = parseArtifacts(msg.content);
         set((prev) => ({
           messages: [
             ...prev.messages,
             {
               id: 'resp-' + Date.now(),
               role: 'assistant' as const,
-              content: msg.content,
+              content: cleanText,
               timestamp: new Date(),
+              artifacts: artifacts.length > 0 ? artifacts : undefined,
             },
           ],
           streamingContent: '',
@@ -232,6 +246,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         }));
         setTimeout(() => set({ eyeState: 'watching' }), 1500);
         break;
+      }
 
       case 'status':
         set({ eyeState: msg.eye_state, activeModel: msg.model, accessTier: getModelTier(msg.model) });

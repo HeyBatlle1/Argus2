@@ -1,6 +1,7 @@
 //! Argus CLI - The Hundred-Eyed Agent
 
 mod checkin;
+mod discord;
 mod telegram;
 mod tui;
 mod web;
@@ -54,6 +55,8 @@ enum Commands {
         #[arg(short, long, default_value = "9000")]
         port: u16,
     },
+    /// Run Discord intranet bot (requires --features discord)
+    Discord,
     /// Run in daemon mode
     Daemon,
 }
@@ -96,6 +99,16 @@ fn load_agent_config(vault: &SecureVault, cli_api_key: Option<String>) -> anyhow
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Structured logging — level controlled by RUST_LOG env var.
+    // Defaults to INFO. Example: RUST_LOG=argus_core=debug,argus_cli=trace
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
     let cli = Cli::parse();
 
     let vault_file = vault_path();
@@ -172,8 +185,27 @@ async fn main() -> anyhow::Result<()> {
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
             }
+            let vault_keys = vault.list_keys();
             println!("{}", LOGO);
-            web::run_web_server(port, config).await?;
+            web::run_web_server(port, config, vault_keys).await?;
+        }
+
+        Some(Commands::Discord) => {
+            let vault = vault.as_mut().unwrap();
+            let config = load_agent_config(vault, None)?;
+            let bot_token = vault.retrieve("discord_bot_token").ok()
+                .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok());
+            let channel_id = vault.retrieve("discord_channel_id").ok()
+                .or_else(|| std::env::var("DISCORD_CHANNEL_ID").ok());
+            let discord_cfg = discord::DiscordConfig::from_env_or_vault(bot_token, channel_id)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Discord credentials missing.\n\
+                     Store with:\n  \
+                     argus vault set discord_bot_token  YOUR_TOKEN\n  \
+                     argus vault set discord_channel_id YOUR_CHANNEL_ID"
+                ))?;
+            println!("[+] Starting Discord bot...");
+            discord::run_discord_bot(discord_cfg, config).await?;
         }
 
         Some(Commands::Daemon) => {
@@ -226,6 +258,24 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
             config.embedding = embedding_client;
+
+            // Generate or retrieve the exec server auth token.
+            // Sent as X-Argus-Auth on every /exec request to argus-workspace.
+            // Stored in vault across restarts; new token generated on first run.
+            let exec_auth_token = vault.as_ref()
+                .and_then(|v| v.retrieve("workspace_exec_token").ok())
+                .or_else(|| std::env::var("WORKSPACE_EXEC_TOKEN").ok())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+            if let Some(ref mut v) = vault {
+                if v.retrieve("workspace_exec_token").is_err() {
+                    let _ = v.store("workspace_exec_token", &exec_auth_token);
+                }
+            }
+            // Surface the token to the host environment so argus-up.sh can export it
+            // to docker-compose, which passes it to argus-workspace as WORKSPACE_EXEC_TOKEN.
+            std::env::set_var("WORKSPACE_EXEC_TOKEN", &exec_auth_token);
+            config.exec_auth_token = Some(exec_auth_token);
 
             // Wire shell prompter — HIGH risk commands require Telegram approval
             config.shell_prompter = match (bot_token.clone(), checkin_chat_id) {
@@ -290,8 +340,23 @@ async fn main() -> anyhow::Result<()> {
                         checkin_chat_id,
                     ) {
                         let anchor_chain = chain_arc.clone();
-                        let signing_key = argus_audit::sha256_hex(&config.api_key)
-                            .into_bytes();
+
+                        // Use a dedicated audit HMAC key — not derived from the API key.
+                        // Rotating the OpenRouter key does not affect audit chain verification.
+                        let audit_hmac_key_existing = vault.as_ref()
+                            .and_then(|v| v.retrieve("audit_hmac_key").ok());
+                        let audit_hmac_key = match audit_hmac_key_existing {
+                            Some(k) => k,
+                            None => {
+                                // First run: generate and persist a dedicated signing key
+                                let key = argus_audit::sha256_hex(&uuid::Uuid::new_v4().to_string());
+                                if let Some(ref mut v) = vault {
+                                    let _ = v.store("audit_hmac_key", &key);
+                                }
+                                key
+                            }
+                        };
+                        let signing_key = audit_hmac_key.into_bytes();
                         tokio::spawn(async move {
                             loop {
                                 let now = chrono::Utc::now();
@@ -316,6 +381,33 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             config.audit = audit_arc;
+
+            // Start web server on port 9000 as a background task so the
+            // Next.js frontend can connect via WebSocket while Telegram runs.
+            // Pass the full daemon config so the web UI gets shell approval,
+            // workspace auth, semantic memory, and audit — same capabilities as Telegram.
+            {
+                let web_cfg = AgentConfig {
+                    api_key:         config.api_key.clone(),
+                    model:           config.model.clone(),
+                    api_url:         config.api_url.clone(),
+                    temperature:     config.temperature,
+                    brave_search_key: config.brave_search_key.clone(),
+                    shell_prompter:  config.shell_prompter.clone(),
+                    exec_auth_token: config.exec_auth_token.clone(),
+                    embedding:       config.embedding.clone(),
+                    audit:           config.audit.clone(),
+                };
+                let web_vault_keys = vault.as_ref()
+                    .map(|v| v.list_keys())
+                    .unwrap_or_default();
+                tokio::spawn(async move {
+                    println!("[+] Web server starting on port 9000...");
+                    if let Err(e) = web::run_web_server(9000, web_cfg, web_vault_keys).await {
+                        eprintln!("[!] Web server error: {}", e);
+                    }
+                });
+            }
 
             match bot_token {
                 Some(token) => {

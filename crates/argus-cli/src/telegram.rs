@@ -1,11 +1,17 @@
 //! Telegram Bot for Argus
 
 use teloxide::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use argus_memory::sqlite::SqliteMemory;
 use argus_core::{AgentConfig, AgentEvent, ConversationMessage, ShellPolicy, MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK, MODEL_GEMINI, model_label};
+
+/// Per-chat rate limit: max N messages per window.
+const RATE_LIMIT_MAX: u32 = 10;
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 struct ArgusBot {
     config: AgentConfig,
@@ -13,6 +19,8 @@ struct ArgusBot {
     memory: SqliteMemory,
     mcp: argus_core::mcp::McpClient,
     shell_policy: ShellPolicy,
+    /// Rate limiter: chat_id → (message_count, window_start)
+    rate_limits: HashMap<i64, (u32, Instant)>,
 }
 
 impl ArgusBot {
@@ -26,6 +34,26 @@ impl ArgusBot {
             memory: SqliteMemory::open_default().expect("failed to open memory db"),
             mcp,
             shell_policy: ShellPolicy::default(),
+            rate_limits: HashMap::new(),
+        }
+    }
+
+    /// Check if a chat_id is within the rate limit.
+    /// Returns true if the message should be processed, false if it should be dropped.
+    fn check_rate_limit(&mut self, chat_id: i64) -> bool {
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        let entry = self.rate_limits.entry(chat_id).or_insert((0, now));
+        if now.duration_since(entry.1) >= window {
+            // Window expired — reset
+            *entry = (1, now);
+            true
+        } else if entry.0 < RATE_LIMIT_MAX {
+            entry.0 += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -85,9 +113,13 @@ impl ArgusBot {
             }
         }
 
-        history.push(ConversationMessage { role: "user".to_string(), content: user_msg.to_string() });
+        history.push(ConversationMessage { role: "user".to_string(), content: user_msg.to_string(), model: None });
         if !response_text.is_empty() {
-            history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
+            history.push(ConversationMessage {
+                role: "assistant".to_string(),
+                content: response_text.clone(),
+                model: Some(self.config.model.clone()),
+            });
         }
         let _ = self.memory.save_history(chat_id, &history);
 
@@ -207,7 +239,12 @@ pub async fn run_telegram_bot(token: String, config: AgentConfig) {
                 let chat_id = msg.chat.id.0;
                 let response = {
                     let mut agent = argus.lock().await;
-                    if let Some(cmd_reply) = agent.handle_command(text) {
+                    if !agent.check_rate_limit(chat_id) {
+                        format!(
+                            "Rate limit: max {} messages per {}s. Please wait.",
+                            RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SECS
+                        )
+                    } else if let Some(cmd_reply) = agent.handle_command(text) {
                         cmd_reply
                     } else {
                         agent.process_message(chat_id, text).await

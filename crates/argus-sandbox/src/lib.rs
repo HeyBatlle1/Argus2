@@ -4,5 +4,3 @@
 
 pub mod wasm;
 pub mod capabilities;
-
-// TODO: Implement sandbox runtime

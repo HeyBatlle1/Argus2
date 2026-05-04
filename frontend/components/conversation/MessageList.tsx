@@ -5,8 +5,13 @@ import { useAgentStore } from '@/hooks/useAgentState';
 import { UserMessage } from './UserMessage';
 import { ArgusMessage } from './ArgusMessage';
 import { ToolCallBlock } from './ToolCallBlock';
+import { Artifact } from '@/lib/types';
 
-export function MessageList() {
+interface Props {
+  onOpenArtifact: (artifacts: Artifact[], index: number) => void;
+}
+
+export function MessageList({ onOpenArtifact }: Props) {
   const messages = useAgentStore((s) => s.messages);
   const streamingContent = useAgentStore((s) => s.streamingContent);
   const isStreaming = useAgentStore((s) => s.isStreaming);
@@ -22,18 +27,21 @@ export function MessageList() {
         if (msg.role === 'user') {
           return <UserMessage key={msg.id} message={msg} />;
         }
-        // Assistant message — may have tool calls, content, or both
         return (
           <div key={msg.id}>
             {msg.toolCalls?.map((tc) => (
               <ToolCallBlock key={tc.id} toolCall={tc} />
             ))}
-            {msg.content && <ArgusMessage message={msg} />}
+            {(msg.content || msg.artifacts?.length) ? (
+              <ArgusMessage
+                message={msg}
+                onOpenArtifact={onOpenArtifact}
+              />
+            ) : null}
           </div>
         );
       })}
 
-      {/* Streaming in-progress */}
       {isStreaming && streamingContent && (
         <div className="animate-fade-in">
           <div className="argus-prose text-argus-text text-sm leading-relaxed whitespace-pre-wrap">

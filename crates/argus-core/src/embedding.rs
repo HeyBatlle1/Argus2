@@ -55,6 +55,7 @@ impl EmbeddingClient {
         let body = serde_json::json!({
             "model": EMBEDDING_MODEL,
             "input": truncated,
+            "dimensions": EMBEDDING_DIMS,
         });
 
         let resp = self.http
@@ -183,13 +184,23 @@ impl EmbeddingClient {
         task_context: Option<String>,
     ) -> Result<(), String> {
         let post = DiscoursePost {
-            author: author.to_string(),
+            from_agent: author.to_string(),
             post_type: "finding".to_string(),
             content: content.to_string(),
             task_context,
             requires_human_review: false,
         };
-        self.supabase.write_discourse(&post).await
+        self.supabase.write_discourse(&post).await?;
+
+        // Also store a semantic vector so this finding is retrievable via similarity search
+        let disc_id = format!("disc_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros());
+        if let Err(e) = self.store_discourse_embedding(&disc_id, content, author, "finding").await {
+            eprintln!("[embed] discourse embedding failed: {}", e);
+        }
+        Ok(())
     }
 
     pub fn format_context_block(results: &[SemanticResult]) -> Option<String> {
@@ -220,8 +231,8 @@ impl EmbeddingClient {
         for p in posts {
             let when = p.created_at.as_deref().unwrap_or("recently");
             lines.push(format!(
-                "[{post_type} | {author} | {when}]\n{content}",
-                post_type = p.post_type, author = p.author,
+                "[{post_type} | {agent} | {when}]\n{content}",
+                post_type = p.post_type, agent = p.from_agent,
                 when = when, content = p.content,
             ));
         }

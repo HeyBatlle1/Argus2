@@ -12,6 +12,11 @@ echo "[*] Pulling secrets..."
 if [ -f "$BINARY" ]; then
   export OPENROUTER_API_KEY=$("$BINARY" vault get openrouter_api_key 2>/dev/null)
   export TELEGRAM_BOT_TOKEN=$("$BINARY" vault get telegram_bot_token 2>/dev/null)
+  export SUPABASE_ARGUS_URL=$("$BINARY" vault get supabase_argus_url 2>/dev/null || echo "")
+  export SUPABASE_ARGUS_SERVICE_KEY=$("$BINARY" vault get supabase_argus_service_key 2>/dev/null || echo "")
+  export TELEGRAM_CHAT_ID=$("$BINARY" vault get telegram_chat_id 2>/dev/null || echo "")
+  export WORKSPACE_EXEC_TOKEN=$("$BINARY" vault get workspace_exec_token 2>/dev/null || echo "")
+  export BRAVE_SEARCH_API_KEY=$("$BINARY" vault get brave_search_api_key 2>/dev/null || echo "")
   echo "[+] Loaded from vault binary"
 
 # Strategy 2: macOS Keychain fallback (when binary not built)
@@ -34,6 +39,9 @@ elif command -v security &>/dev/null; then
     security add-generic-password -a "argus" -s "telegram_bot_token" -w "$TELEGRAM_BOT_TOKEN" 2>/dev/null || true
     echo "[+] Saved to Keychain"
   fi
+  export SUPABASE_ARGUS_URL=""
+  export SUPABASE_ARGUS_SERVICE_KEY=""
+  export TELEGRAM_CHAT_ID=""
   echo "[+] Loaded from macOS Keychain"
 
 # Strategy 3: Nothing available

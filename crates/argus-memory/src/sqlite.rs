@@ -48,11 +48,17 @@ impl SqliteMemory {
                 chat_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                model TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_history_chat ON conversation_history(chat_id, id);",
         )
         .map_err(|e| format!("Failed to create tables: {}", e))?;
+
+        // Migrate existing DBs that predate the model column (error ignored — column may already exist).
+        let _ = conn.execute_batch(
+            "ALTER TABLE conversation_history ADD COLUMN model TEXT;"
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -78,8 +84,8 @@ impl SqliteMemory {
         let start = messages.len().saturating_sub(40);
         for msg in &messages[start..] {
             conn.execute(
-                "INSERT INTO conversation_history (chat_id, role, content) VALUES (?1, ?2, ?3)",
-                params![chat_id, msg.role, msg.content],
+                "INSERT INTO conversation_history (chat_id, role, content, model) VALUES (?1, ?2, ?3, ?4)",
+                params![chat_id, msg.role, msg.content, msg.model],
             )
             .map_err(|e| format!("Failed to save history turn: {}", e))?;
         }
@@ -91,14 +97,15 @@ impl SqliteMemory {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT role, content FROM conversation_history WHERE chat_id = ?1 ORDER BY id ASC",
+                "SELECT role, content, model FROM conversation_history WHERE chat_id = ?1 ORDER BY id ASC",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![chat_id], |row| {
                 Ok(ConversationMessage {
-                    role: row.get(0)?,
+                    role:    row.get(0)?,
                     content: row.get(1)?,
+                    model:   row.get(2)?,
                 })
             })
             .map_err(|e| e.to_string())?;

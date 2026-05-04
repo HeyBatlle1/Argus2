@@ -5,26 +5,26 @@
 @tailwind utilities;
 
 :root {
-  --bg:            #080810;
-  --bg2:           #0c0c18;
-  --amber:         #f0a500;
-  --amber-dim:     #a87020;
-  --amber-bright:  #ffcc44;
+  --bg:            #0d0d16;
+  --bg2:           #12121f;
+  --amber:         #f5b800;
+  --amber-dim:     #c48a20;
+  --amber-bright:  #ffe066;
   --green:         #1a4a20;
   --green-light:   #39d353;
   --red:           #ff4444;
   --red-dim:       #8b1a1a;
-  --text:          #f0ede4;
-  --text-dim:      #9d9a91;
+  --text:          #e8e5dc;
+  --text-dim:      #b8b5ac;
   --text-bright:   #ffffff;
-  --border:        #2a2a44;
-  --border-bright: #4a4a6a;
-  --surface:       #12121e;
-  --surface-hi:    #1a1a2e;
+  --border:        #32325a;
+  --border-bright: #5a5a8a;
+  --surface:       #16162a;
+  --surface-hi:    #1e1e38;
   --blue:          #1a3a5c;
   --blue-light:    #5aafef;
-  --input:         #1e1e30;
-  --input-border:  #3a3a5a;
+  --input:         #22223a;
+  --input-border:  #4a4a72;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -35,7 +35,7 @@ body {
   font-family: 'Instrument Sans', sans-serif;
   background-color: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

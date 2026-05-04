@@ -8,7 +8,7 @@ interface Props {
 }
 
 const STATE_COLOR = {
-  idle:     '#1a1a2e',
+  idle:     '#32325a',
   active:   '#4a8fc4',
   complete: '#4a7c59',
   error:    '#8b1a1a',

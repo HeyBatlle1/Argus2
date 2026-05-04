@@ -18,7 +18,7 @@ const STATE_EYE: Record<string, 'thinking' | 'executing' | 'complete' | 'watchin
 };
 
 const BORDER_COLOR = {
-  pending:   '#1a1a2e',
+  pending:   '#5a5a8a',
   executing: '#4a8fc4',
   complete:  '#4a7c59',
   error:     '#8b1a1a',
@@ -46,7 +46,7 @@ export function ToolCallBlock({ toolCall }: Props) {
       className="my-2 rounded overflow-hidden"
       style={{
         borderLeft: `2px solid ${borderColor}`,
-        background: 'linear-gradient(135deg, #0d0d14, #111118)',
+        background: 'linear-gradient(135deg, #12121f, #16162a)',
       }}
     >
       {/* Header */}
@@ -96,7 +96,7 @@ export function ToolCallBlock({ toolCall }: Props) {
         <div className="border-t border-argus-border/40 px-3 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="font-mono text-sm" style={{ color: toolCall.success ? '#4a7c59' : '#8b1a1a' }}>
+              <span className="font-mono text-sm" style={{ color: toolCall.success ? '#39d353' : '#ff4444' }}>
                 {toolCall.success ? '✦' : '✕'}
               </span>
               <span className="text-[10px] font-mono text-argus-textDim truncate max-w-[220px]">
@@ -127,7 +127,7 @@ export function ToolCallBlock({ toolCall }: Props) {
               >
                 <div
                   className="mt-2 p-2 rounded text-[11px] font-mono text-argus-textDim leading-relaxed max-h-40 overflow-y-auto"
-                  style={{ background: '#0a0a0f' }}
+                  style={{ background: '#16162a' }}
                 >
                   {toolCall.result}
                 </div>

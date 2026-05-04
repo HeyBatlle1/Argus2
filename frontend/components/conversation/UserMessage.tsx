@@ -16,7 +16,7 @@ export function UserMessage({ message }: Props) {
       <div className="max-w-[72%]">
         <div
           className="px-4 py-3 rounded text-sm leading-relaxed"
-          style={{ background: '#1a1a2e', color: '#d4d0c8' }}
+          style={{ background: '#1e1e38', color: '#e8e5dc', borderLeft: '3px solid #5aafef' }}
         >
           {message.content}
         </div>

@@ -29,7 +29,7 @@ export function MindPanel() {
       animate={{ width: collapsed ? 32 : 300 }}
       transition={{ duration: 0.2, ease: 'easeInOut' }}
       className="relative h-full flex-shrink-0 overflow-hidden"
-      style={{ background: '#0a0a0f' }}
+      style={{ background: '#0d0d16' }}
     >
       {/* Collapsed strip */}
       <AnimatePresence>
@@ -63,9 +63,9 @@ export function MindPanel() {
             className="absolute inset-0 flex flex-col overflow-hidden"
           >
             {/* Panel header */}
-            <div className="flex items-center justify-between px-3 py-2 border-b border-argus-border flex-shrink-0">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-argus-borderBright flex-shrink-0" style={{ background: 'var(--surface-hi)' }}>
               <div className="flex items-center gap-2">
-                <span className="text-[9px] font-mono tracking-widest uppercase text-argus-amberDim">
+                <span className="text-[9px] font-mono tracking-widest uppercase text-argus-amber">
                   THE MIND
                 </span>
                 <TierBadge tier={tier} />

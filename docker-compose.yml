@@ -13,12 +13,14 @@ services:
       - SUPABASE_ARGUS_URL=${SUPABASE_ARGUS_URL:-}
       - SUPABASE_ARGUS_SERVICE_KEY=${SUPABASE_ARGUS_SERVICE_KEY:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
     ports:
       - "8888:8888"
       - "9000:9000"
     volumes:
       - argus-data:/argus/data
       - workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - argus-workspace
     deploy:
@@ -43,6 +45,7 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      - ARGUS_DAEMON_URL=http://argus-daemon:9000
     depends_on:
       - argus-daemon
     deploy:
@@ -59,9 +62,12 @@ services:
     restart: unless-stopped
     volumes:
       - workspace:/workspace
-    # No host port mapping — only reachable by argus-daemon on the internal Docker network
+    environment:
+      - WORKSPACE_EXEC_TOKEN=${WORKSPACE_EXEC_TOKEN:-}
+    ports:
+      - "8081:8081"   # Static file server — agent-created HTML pages (browsable on host)
     expose:
-      - "9001"
+      - "9001"        # Exec server — internal Docker network only
     deploy:
       resources:
         limits:

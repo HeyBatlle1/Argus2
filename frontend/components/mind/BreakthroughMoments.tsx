@@ -19,8 +19,8 @@ export function BreakthroughMoments({ breakthroughs }: Props) {
           key={b.id}
           className="p-2.5 rounded"
           style={{
-            background: '#0a0a0f',
-            border: '1px solid #1a1a2e',
+            background: '#16162a',
+            border: '1px solid #32325a',
             boxShadow: `0 0 ${b.emotionalWeight * 1.5}px rgba(201,168,76,${b.emotionalWeight / 80})`,
           }}
           whileHover={{
@@ -36,7 +36,7 @@ export function BreakthroughMoments({ breakthroughs }: Props) {
           <p className="text-[10px] text-argus-textDim leading-relaxed">{b.description}</p>
           {/* Emotional weight */}
           <div className="flex items-center gap-1.5 mt-1.5">
-            <div className="flex-1 h-0.5 rounded-full" style={{ background: '#1a1a2e' }}>
+            <div className="flex-1 h-0.5 rounded-full" style={{ background: '#32325a' }}>
               <div
                 className="h-0.5 rounded-full"
                 style={{ width: `${b.emotionalWeight * 10}%`, background: 'linear-gradient(to right, #8a6f2e, #c9a84c)' }}

@@ -2,7 +2,7 @@
 //!
 //! All built-in tools live here. Shared across TUI, Telegram, and any future frontends.
 
-use crate::shell::{self, ShellPolicy, PermissionPrompter};
+use crate::shell::{ShellPolicy, PermissionPrompter, PermissionRequest, PermissionDecision};
 use serde_json::Value;
 
 const MAX_FILE_CHARS: usize = 8_000;
@@ -139,6 +139,47 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
         {
             "type": "function",
             "function": {
+                "name": "run_python",
+                "description": "Execute Python 3 code in the workspace sandbox and return stdout/stderr. Use for data analysis, computations, generating files, or anything requiring a proper Python runtime. Output from print() appears in stdout.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": { "type": "string", "description": "Python 3 source code to execute" },
+                        "timeout": { "type": "number", "description": "Max execution seconds (default 30, max 120)" }
+                    },
+                    "required": ["code"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_node",
+                "description": "Execute JavaScript/Node.js code in the workspace sandbox and return stdout/stderr. Use for JSON processing, web scraping logic, or anything needing a Node runtime. console.log() output appears in stdout.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": { "type": "string", "description": "JavaScript (Node.js) source code to execute" },
+                        "timeout": { "type": "number", "description": "Max execution seconds (default 30, max 120)" }
+                    },
+                    "required": ["code"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tools",
+                "description": "List every tool available to you in this session — built-ins (shell, web_search, memory, file ops, http) plus any MCP-connected tools. Call this when you need to know your full capabilities.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "http_request",
                 "description": "Make an HTTP request to a URL. Supports GET, POST, PUT, DELETE.",
                 "parameters": {
@@ -171,18 +212,21 @@ pub async fn execute_builtin(
     memory: &dyn MemoryBackend,
     http_client: &reqwest::Client,
     brave_search_key: Option<&str>,
-    shell_prompter: Option<&dyn PermissionPrompter>,
+    shell_prompter: Option<std::sync::Arc<dyn PermissionPrompter>>,
+    exec_auth_token: Option<&str>,
 ) -> Option<String> {
     match name {
         "read_file"      => Some(tool_read_file(args)),
         "list_directory" => Some(tool_list_directory(args)),
         "write_file"     => Some(tool_write_file(args)),
-        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter, http_client).await),
+        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter, http_client, exec_auth_token).await),
         "web_search"     => Some(tool_web_search(args, http_client, brave_search_key).await),
         "remember"       => Some(tool_remember(args, memory)),
         "recall"         => Some(tool_recall(args, memory)),
         "forget"         => Some(tool_forget(args, memory)),
         "http_request"   => Some(tool_http_request(args, http_client).await),
+        "run_python"     => Some(tool_run_code("python", args, http_client, exec_auth_token).await),
+        "run_node"       => Some(tool_run_code("javascript", args, http_client, exec_auth_token).await),
         _                => None,
     }
 }
@@ -314,8 +358,21 @@ fn tool_write_file(args: &Value) -> String {
         return format!("Write blocked: {}", reason);
     }
 
-    match std::fs::write(path, content) {
-        Ok(_) => format!("Written {} bytes to {}", content.len(), path),
+    // Resolve the canonical path and use it for the actual write — this ensures
+    // the blocklist check and the write operation target the same path, closing
+    // the gap where a symlink could redirect a write after the check.
+    let write_path = {
+        let p = std::path::Path::new(path);
+        p.canonicalize()
+            .or_else(|_| p.parent()
+                .and_then(|par| par.canonicalize().ok()
+                    .map(|c| c.join(p.file_name().unwrap_or_default())))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve")))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+
+    match std::fs::write(&write_path, content) {
+        Ok(_) => format!("Written {} bytes to {}", content.len(), write_path.display()),
         Err(e) => format!("Error writing file: {}", e),
     }
 }
@@ -323,27 +380,63 @@ fn tool_write_file(args: &Value) -> String {
 async fn tool_shell(
     args: &Value,
     policy: &ShellPolicy,
-    prompter: Option<&dyn PermissionPrompter>,
+    prompter: Option<std::sync::Arc<dyn PermissionPrompter>>,
     http_client: &reqwest::Client,
+    exec_auth_token: Option<&str>,
 ) -> String {
     let command = args["command"].as_str().unwrap_or("");
     if command.is_empty() {
         return "No command provided".to_string();
     }
 
-    // Risk classification and operator approval (Telegram prompt for HIGH risk)
-    if let Err(e) = policy.authorize(command, prompter) {
-        return format!("Shell blocked: {}", e);
+    // Step 1: fast, non-blocking risk evaluation (pure pattern matching — no I/O)
+    let risk = match policy.evaluate(command) {
+        Err(e) => return format!("Shell blocked: {}", e),
+        Ok(r)  => r,
+    };
+
+    // Step 2: HIGH risk requires operator approval via the prompter.
+    // The TelegramPrompter polls for /approve or /deny for up to 60 seconds using
+    // std::thread::sleep. We run it in spawn_blocking so the tokio runtime is never
+    // starved — concurrent Telegram messages and WebSocket turns remain responsive.
+    if risk >= policy.approval_threshold {
+        match prompter {
+            None => return format!(
+                "Shell blocked: {} risk command requires approval but no prompter is configured. \
+                 Set up Telegram bot to enable HIGH risk approval.",
+                risk.as_str()
+            ),
+            Some(p) => {
+                let request = PermissionRequest {
+                    command: command.to_string(),
+                    risk,
+                    reason: format!("{} risk command requires approval before execution", risk.as_str()),
+                };
+                let decision = tokio::task::spawn_blocking(move || p.prompt(&request))
+                    .await
+                    .unwrap_or_else(|_| PermissionDecision::Deny {
+                        reason: "Prompter task panicked or was cancelled".to_string(),
+                    });
+                if let PermissionDecision::Deny { reason } = decision {
+                    return format!("Shell blocked: {}", reason);
+                }
+            }
+        }
     }
 
     // Route execution to argus-workspace via internal Docker network
     let payload = serde_json::json!({ "command": command });
-    let resp = http_client
+    let mut req = http_client
         .post("http://argus-workspace:9001/exec")
         .json(&payload)
-        .timeout(std::time::Duration::from_secs(35))
-        .send()
-        .await;
+        .timeout(std::time::Duration::from_secs(35));
+
+    // Authenticate every exec request — blocks prompt-injection SSRF
+    if let Some(token) = exec_auth_token {
+        req = req.header("X-Argus-Auth", token);
+    }
+
+    let resp = req.send().await;
 
     match resp {
         Err(e) => format!("Workspace unreachable: {}", e),
@@ -476,6 +569,65 @@ fn tool_forget(args: &Value, memory: &dyn MemoryBackend) -> String {
     }
 }
 
+/// Execute a code snippet via the workspace /run endpoint (language-aware).
+async fn tool_run_code(
+    language: &str,
+    args: &Value,
+    client: &reqwest::Client,
+    exec_auth_token: Option<&str>,
+) -> String {
+    let code    = args["code"].as_str().unwrap_or("").trim().to_string();
+    let timeout = args["timeout"].as_u64().unwrap_or(30).min(120);
+
+    if code.is_empty() {
+        return "No code provided".to_string();
+    }
+
+    let payload = serde_json::json!({ "language": language, "code": code, "timeout": timeout });
+    let mut req = client
+        .post("http://argus-workspace:9001/run")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(timeout + 5));
+
+    if let Some(token) = exec_auth_token {
+        req = req.header("X-Argus-Auth", token);
+    }
+
+    match req.send().await {
+        Err(e) => format!("Workspace unreachable: {}", e),
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Err(e) => format!("Workspace response error: {}", e),
+            Ok(json) => {
+                let stdout    = json["stdout"].as_str().unwrap_or("").trim_end();
+                let stderr    = json["stderr"].as_str().unwrap_or("").trim_end();
+                let exit_code = json["exit_code"].as_i64().unwrap_or(-1);
+                let error     = json["error"].as_str().unwrap_or("");
+
+                if !error.is_empty() {
+                    return format!("Error: {}", error);
+                }
+
+                let mut out = String::new();
+                if !stdout.is_empty() { out.push_str(stdout); }
+                if !stderr.is_empty() {
+                    if !out.is_empty() { out.push('\n'); }
+                    out.push_str(&format!("[stderr]\n{}", stderr));
+                }
+                if out.is_empty() {
+                    out = if exit_code == 0 {
+                        "(no output)".to_string()
+                    } else {
+                        format!("Exit {}", exit_code)
+                    };
+                } else if exit_code != 0 {
+                    out.push_str(&format!("\n[exit {}]", exit_code));
+                }
+                out
+            }
+        }
+    }
+}
+
 /// Validate a URL against the egress policy.
 /// Blocks SSRF vectors, private networks, cloud metadata endpoints, and non-HTTP schemes.
 fn validate_egress_url(url: &str) -> Result<(), String> {
@@ -491,6 +643,16 @@ fn validate_egress_url(url: &str) -> Result<(), String> {
 
     if host.is_empty() {
         return Err("No host in URL".to_string());
+    }
+
+    // Block internal Docker service hostnames explicitly — before IP parsing
+    // so a prompt injection using "http://argus-workspace:9001/exec" is caught
+    // even though it's a hostname, not an IP address.
+    let blocked_hostnames = ["argus-workspace", "argus-daemon", "argus-frontend"];
+    for blocked in &blocked_hostnames {
+        if host == *blocked {
+            return Err(format!("Blocked: internal service hostname {}", host));
+        }
     }
 
     // Cloud metadata endpoints

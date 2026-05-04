@@ -26,7 +26,7 @@ export function PartnershipDynamics({ dynamics }: Props) {
           <div
             key={d.id}
             className="p-2 rounded"
-            style={{ background: '#0a0a0f', border: '1px solid #1a1a2e' }}
+            style={{ background: '#16162a', border: '1px solid #32325a' }}
           >
             <div className="flex items-start justify-between gap-2 mb-1">
               <span className="text-[11px] font-mono text-argus-text font-medium">{d.patternName}</span>
@@ -39,7 +39,7 @@ export function PartnershipDynamics({ dynamics }: Props) {
             </div>
             {/* Importance bar */}
             <div className="flex items-center gap-1.5 mb-1.5">
-              <div className="flex-1 h-0.5 rounded-full" style={{ background: '#1a1a2e' }}>
+              <div className="flex-1 h-0.5 rounded-full" style={{ background: '#32325a' }}>
                 <div
                   className="h-0.5 rounded-full"
                   style={{ width: `${d.importance * 10}%`, background: catColor }}

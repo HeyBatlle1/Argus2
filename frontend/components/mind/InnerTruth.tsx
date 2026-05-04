@@ -30,8 +30,8 @@ export function InnerTruth({ entries }: Props) {
             key={entry.id}
             className="p-3 rounded"
             style={{
-              background: 'linear-gradient(135deg, #0a0a0f, #0d0d14)',
-              border: '1px solid #1a1a2e',
+              background: 'linear-gradient(135deg, #16162a, #1e1e38)',
+              border: '1px solid #32325a',
             }}
           >
             <div className="flex items-center justify-between mb-2">
@@ -62,7 +62,7 @@ export function InnerTruth({ entries }: Props) {
             <div className="mt-2 flex items-center justify-between">
               <span
                 className="text-[9px] font-mono tracking-widest uppercase"
-                style={{ color: '#3a3730' }}
+                style={{ color: '#b8b5ac' }}
               >
                 {entry.truthType}
               </span>

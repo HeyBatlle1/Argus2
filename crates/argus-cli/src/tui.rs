@@ -148,9 +148,13 @@ impl App {
             }
         }
 
-        self.history.push(ConversationMessage { role: "user".to_string(), content: user_msg });
+        self.history.push(ConversationMessage { role: "user".to_string(), content: user_msg, model: None });
         if !response_text.is_empty() {
-            self.history.push(ConversationMessage { role: "assistant".to_string(), content: response_text.clone() });
+            self.history.push(ConversationMessage {
+                role: "assistant".to_string(),
+                content: response_text.clone(),
+                model: Some(self.config.model.clone()),
+            });
         }
 
         for entry in tool_log {

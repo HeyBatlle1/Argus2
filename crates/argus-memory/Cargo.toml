@@ -7,8 +7,11 @@ edition.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 dirs = "5.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
+urlencoding = "2.1"
 
 argus-core = { path = "../argus-core" }
 

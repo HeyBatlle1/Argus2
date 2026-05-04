@@ -97,20 +97,67 @@ struct SystemHealth {
 }
 
 async fn collect_system_health() -> SystemHealth {
-    let run = |cmd: &str| -> String {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unavailable".to_string())
+    use tokio::process::Command;
+    use tokio::time::{timeout, Duration};
+
+    async fn run(cmd: &'static str) -> String {
+        match timeout(
+            Duration::from_secs(3),
+            Command::new("sh").arg("-c").arg(cmd).output(),
+        )
+        .await
+        {
+            Ok(Ok(o)) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => "unavailable".to_string(),
+        }
+    }
+
+    // Linux /proc/meminfo — same logic used in the web.rs sentry handler.
+    // Replaces the macOS-only `vm_stat` that never ran in the daemon container.
+    let memory = {
+        let content = tokio::fs::read_to_string("/proc/meminfo")
+            .await
+            .unwrap_or_default();
+        let mut total_kb: u64 = 0;
+        let mut available_kb: u64 = 0;
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            match parts[0] {
+                "MemTotal:"     => { total_kb     = parts[1].parse().unwrap_or(0); }
+                "MemAvailable:" => { available_kb = parts[1].parse().unwrap_or(0); }
+                _ => {}
+            }
+        }
+        if total_kb == 0 {
+            "unavailable".to_string()
+        } else {
+            let fmt = |kb: u64| -> String {
+                if kb >= 1_048_576 {
+                    format!("{:.1}G", kb as f64 / 1_048_576.0)
+                } else {
+                    format!("{}M", kb / 1024)
+                }
+            };
+            let used = total_kb.saturating_sub(available_kb);
+            format!("{} used, {} free", fmt(used), fmt(available_kb))
+        }
     };
+
+    let (containers, disk) = tokio::join!(
+        run("docker ps --format '{{.Names}} ({{.Status}})' 2>/dev/null | head -5"),
+        run("df -h / 2>/dev/null | tail -1 | awk '{print $3\"/\"$2\" used, \"$4\" free\"}'"),
+    );
 
     SystemHealth {
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string(),
-        containers: run("docker ps --format '{{.Names}} ({{.Status}})' 2>/dev/null | head -5"),
-        disk: run("df -h / 2>/dev/null | tail -1 | awk '{print $3\"/\"$2\" used, \"$4\" free\"}'"),
-        memory: run("vm_stat 2>/dev/null | head -3 | tail -1 | awk '{print $3\" pages free\"}'"),
+        containers,
+        disk,
+        memory,
     }
 }
 

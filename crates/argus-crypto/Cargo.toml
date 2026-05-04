@@ -12,3 +12,6 @@ keyring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+pqcrypto-kyber.workspace = true
+pqcrypto-dilithium.workspace = true
+pqcrypto-traits = "0.3"

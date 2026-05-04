@@ -49,8 +49,6 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-feature
 # Post-quantum crypto
 pqcrypto-kyber = "0.8"      # ML-KEM
 pqcrypto-dilithium = "0.5"  # ML-DSA
-pqcrypto-sphincsplus = "0.7" # SLH-DSA
-
 # Classical crypto (for hybrid schemes)
 ring = "0.17"
 chacha20poly1305 = "0.10"
@@ -60,9 +58,6 @@ keyring = "2.3"
 
 # WASM sandbox
 wasmtime = "16.0"
-
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
 
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }

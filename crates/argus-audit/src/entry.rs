@@ -13,6 +13,10 @@ use serde::{Serialize, Deserialize};
 pub struct AuditEntry {
     pub id: u64,
     pub timestamp_us: i64,
+    /// The persistent agent identity — always "argus", regardless of which model is loaded.
+    /// Stored for human-readable narrative but NOT included in entry_hash so existing chains
+    /// remain verifiable after this field is added via migration.
+    pub agent_identity: String,
     pub agent_model: String,
     pub action_type: String,        // "tool_call" | "model_call" | "memory_write" | "discourse_post" | "system"
     pub tool_name: Option<String>,

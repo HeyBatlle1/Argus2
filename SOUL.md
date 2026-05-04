@@ -174,6 +174,15 @@ Every layer has one job. No layer reaches into another's domain.
 
 ---
 
+## Audit Chain Integrity
+
+The audit HMAC key is stored separately from all operational API keys in the vault
+(`audit_hmac_key`). Rotating the OpenRouter key does not affect audit chain verification.
+The `audit_hmac_key` should be rotated only when the vault itself is compromised,
+and only after re-signing all historical anchors.
+
+---
+
 ## What's Coming
 
 The WASM sandbox is the next real milestone. Right now the shell policy provides safety through allowlisting — fine for known-good commands. The sandbox will provide safety through isolation — untrusted tools run in a constrained WASM environment with explicit capability grants.

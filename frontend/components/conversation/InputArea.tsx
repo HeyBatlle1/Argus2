@@ -72,8 +72,8 @@ export function InputArea() {
           disabled={!value.trim() || isStreaming}
           className="flex-shrink-0 w-7 h-7 rounded flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           style={{
-            background: value.trim() && !isStreaming ? 'rgba(201,168,76,0.15)' : 'transparent',
-            color: value.trim() && !isStreaming ? '#c9a84c' : '#8a877f',
+            background: value.trim() && !isStreaming ? 'rgba(245,184,0,0.2)' : 'transparent',
+            color: value.trim() && !isStreaming ? '#f5b800' : '#b8b5ac',
           }}
           animate={
             isStreaming

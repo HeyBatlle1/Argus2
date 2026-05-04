@@ -18,8 +18,8 @@ export function CuriosityLog({ items }: Props) {
           key={item.id}
           className="p-2 rounded text-sm"
           style={{
-            background: '#0a0a0f',
-            borderLeft: item.worthExploring ? '2px solid #c9a84c' : '2px solid #1a1a2e',
+            background: '#16162a',
+            borderLeft: item.worthExploring ? '2px solid #c9a84c' : '2px solid #32325a',
             boxShadow: item.worthExploring && item.intensity > 7
               ? `0 0 ${item.intensity}px rgba(201,168,76,0.15)`
               : 'none',
@@ -34,7 +34,7 @@ export function CuriosityLog({ items }: Props) {
                   key={i}
                   className="w-1 h-1 rounded-full"
                   style={{
-                    background: i < item.intensity ? '#c9a84c' : '#1a1a2e',
+                    background: i < item.intensity ? '#f5b800' : '#32325a',
                     opacity: i < item.intensity ? 0.4 + (i / 10) * 0.6 : 1,
                   }}
                 />

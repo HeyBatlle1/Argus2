@@ -1,5 +1,5 @@
 export type EyeState = 'watching' | 'thinking' | 'executing' | 'complete';
-export type ModelId = 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | 'grok' | 'gemini-flash';
+export type ModelId = 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | 'grok' | 'grok-fast' | 'grok-multi' | 'gemini-flash';
 export type AccessTier = 'royal' | 'allied' | 'guest';
 export type ToolName =
   | 'read_file'
@@ -22,12 +22,22 @@ export type MemoryType =
   | 'breakthrough'
   | 'personal_history';
 
+export type ArtifactType = 'html' | 'svg' | 'markdown' | 'python' | 'javascript' | 'css' | 'json' | string;
+
+export interface Artifact {
+  id: string;
+  type: ArtifactType;
+  title: string;
+  content: string;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
   toolCalls?: ToolCall[];
+  artifacts?: Artifact[];
 }
 
 export interface ToolCall {
@@ -112,7 +122,7 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'thinking' }
-  | { type: 'connected'; version: string; model: string }
+  | { type: 'connected'; version: string; model: string; vault_keys: string[]; mcp_servers: string[] }
   | { type: 'tool_call'; name: string; args: Record<string, unknown>; callId: string }
   | { type: 'tool_result'; name: string; result: string; success: boolean; callId: string }
   | { type: 'response_chunk'; content: string }

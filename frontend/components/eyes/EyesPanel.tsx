@@ -18,6 +18,9 @@ export function EyesPanel() {
   const activeModel = useAgentStore((s) => s.activeModel);
   const tools = useAgentStore((s) => s.tools);
   const startTime = useAgentStore((s) => s.startTime);
+  const vaultKeys = useAgentStore((s) => s.vaultKeys);
+  const mcpServers = useAgentStore((s) => s.mcpServers);
+  const connected = useAgentStore((s) => s.connected);
 
   const modelCfg = MODEL_CONFIG[activeModel];
 
@@ -26,7 +29,7 @@ export function EyesPanel() {
       animate={{ width: collapsed ? 32 : 240 }}
       transition={{ duration: 0.2, ease: 'easeInOut' }}
       className="relative h-full border-r border-argus-border flex-shrink-0 overflow-hidden"
-      style={{ background: '#0a0a0f' }}
+      style={{ background: '#0d0d16' }}
     >
       {/* Collapsed strip */}
       <AnimatePresence>
@@ -58,8 +61,8 @@ export function EyesPanel() {
             className="absolute inset-0 flex flex-col overflow-y-auto"
           >
             {/* Panel header */}
-            <div className="flex items-center justify-between px-3 py-2 border-b border-argus-border flex-shrink-0">
-              <span className="text-[9px] font-mono tracking-widest uppercase text-argus-amberDim">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-argus-borderBright flex-shrink-0" style={{ background: 'var(--surface-hi)' }}>
+              <span className="text-[9px] font-mono tracking-widest uppercase text-argus-amber">
                 THE EYES
               </span>
               <button
@@ -101,14 +104,25 @@ export function EyesPanel() {
             {/* Vault */}
             <CollapsibleSection title="Vault" defaultOpen={true}>
               <VaultStatus
-                locked={false}
-                keys={['openrouter_api_key', 'brave_search_api_key', 'telegram_bot_token']}
+                locked={!connected}
+                keys={vaultKeys}
               />
             </CollapsibleSection>
 
             {/* MCP Servers */}
-            <CollapsibleSection title="MCP Servers" defaultOpen={false} count={0}>
-              <p className="text-[10px] font-mono text-argus-textDim">No servers connected.</p>
+            <CollapsibleSection title="MCP Servers" defaultOpen={false} count={mcpServers.length}>
+              {mcpServers.length === 0 ? (
+                <p className="text-[10px] font-mono text-argus-textDim">No servers connected.</p>
+              ) : (
+                <div className="space-y-1">
+                  {mcpServers.map((name) => (
+                    <div key={name} className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-argus-greenLight flex-shrink-0" />
+                      <span className="text-[10px] font-mono text-argus-textDim truncate">{name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CollapsibleSection>
 
             {/* System */}
