@@ -229,6 +229,16 @@ async fn summarize_and_embed(
 
 pub async fn run_telegram_bot(token: String, config: AgentConfig) {
     println!("Argus Telegram bot starting...");
+    if token.is_empty() || !token.contains(':') {
+        eprintln!("[!] Telegram bot token is missing or malformed — bot disabled. Run ./argus-up.sh to load secrets from vault.");
+        return;
+    }
+    let bot = Bot::new(token.clone());
+    // Verify the token is valid before starting the dispatcher (avoids a panic inside teloxide)
+    if let Err(e) = bot.get_me().await {
+        eprintln!("[!] Telegram bot token rejected by API ({}) — bot disabled.", e);
+        return;
+    }
     let bot = Bot::new(token);
     let argus = Arc::new(Mutex::new(ArgusBot::new(config)));
 
