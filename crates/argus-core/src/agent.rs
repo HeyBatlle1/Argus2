@@ -7,6 +7,7 @@ use crate::embedding::EmbeddingClient;
 use crate::shell::PermissionPrompter;
 use std::sync::Arc;
 use serde_json::Value;
+use uuid::Uuid;
 
 const MAX_TOOL_ROUNDS: usize = 8;
 const PREVIEW_CHARS: usize = 100;
@@ -196,8 +197,8 @@ pub struct ConversationMessage {
 pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
 pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-6";
 pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-7";
-pub const MODEL_GROK:       &str = "x-ai/grok-4";
-pub const MODEL_GROK_FAST:  &str = "x-ai/grok-4.1-fast";
+pub const MODEL_GROK:       &str = "x-ai/grok-4.3";
+pub const MODEL_GROK_FAST:  &str = "x-ai/grok-4.20";
 pub const MODEL_GROK_MULTI: &str = "x-ai/grok-4.20-multi-agent";
 pub const MODEL_GEMINI: &str = "google/gemini-3.1-pro-preview";
 
@@ -206,12 +207,18 @@ pub fn model_label(model_id: &str) -> &'static str {
         MODEL_HAIKU  => "Haiku   (fast / cheap)",
         MODEL_SONNET => "Sonnet  (balanced)",
         MODEL_OPUS   => "Opus    (max intelligence)",
-        MODEL_GROK       => "Grok 4",
-        MODEL_GROK_FAST  => "Grok 4.1 Fast  (default)",
-        MODEL_GROK_MULTI => "Grok 4.20 Multi-Agent",
+        MODEL_GROK       => "Grok 4.3",
+        MODEL_GROK_FAST  => "Grok 4.20  (default)",
+        MODEL_GROK_MULTI => "Grok 4.20 Multi-Agent (no tools)",
         MODEL_GEMINI => "Gemini  (Google Pro)",
         _            => "Unknown model",
     }
+}
+
+/// Returns false for models that don't support OpenAI-style tool_use via OpenRouter.
+/// When false, the agent sends no tools array — the model responds in plain text only.
+pub fn model_supports_tools(model_id: &str) -> bool {
+    !matches!(model_id, MODEL_GROK_MULTI)
 }
 
 pub struct AgentConfig {
@@ -430,17 +437,20 @@ where
     messages.push(serde_json::json!({"role": "user", "content": user_message}));
 
     for _round in 0..MAX_TOOL_ROUNDS {
+        let mut req_body = serde_json::json!({
+            "model": config.model,
+            "messages": messages,
+            "temperature": config.temperature,
+        });
+        if model_supports_tools(&config.model) {
+            req_body["tools"] = serde_json::json!(tool_schemas);
+            req_body["tool_choice"] = serde_json::json!("auto");
+        }
         let resp = http_client
             .post(&config.api_url)
             .header("Authorization", format!("Bearer {}", config.api_key))
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "model": config.model,
-                "messages": messages,
-                "tools": tool_schemas,
-                "tool_choice": "auto",
-                "temperature": config.temperature,
-            }))
+            .json(&req_body)
             .send()
             .await
             .map_err(|e| format!("API request failed: {}", e))?;
@@ -559,10 +569,7 @@ where
                     if !mem_content.is_empty() {
                         let emb = emb.clone();
                         let agent = config.model.clone();
-                        let mem_id = format!("mem_{}", std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_micros());
+                        let mem_id = Uuid::new_v4().to_string();
                         tokio::spawn(async move {
                             if let Err(e) = emb.store_memory_embedding(&mem_id, &mem_content, &agent).await {
                                 eprintln!("[embed] memory store failed: {}", e);

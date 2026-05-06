@@ -11,6 +11,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::supabase::{SupabaseClient, DiscoursePost, DiscourseRecord};
 
@@ -193,10 +194,7 @@ impl EmbeddingClient {
         self.supabase.write_discourse(&post).await?;
 
         // Also store a semantic vector so this finding is retrievable via similarity search
-        let disc_id = format!("disc_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros());
+        let disc_id = Uuid::new_v4().to_string();
         if let Err(e) = self.store_discourse_embedding(&disc_id, content, author, "finding").await {
             eprintln!("[embed] discourse embedding failed: {}", e);
         }
