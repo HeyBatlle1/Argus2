@@ -2,7 +2,7 @@
 
 **Secure Local AI Agent Runtime**
 
-A production-grade AI agent built in Rust. Vault-backed secrets, sandboxed execution, cryptographic audit chain, multi-model support. Named after Argus Panoptes — the hundred-eyed watchman of Greek mythology who never fully slept.
+A production-grade AI agent built in Rust. Vault-backed secrets, sandboxed execution, cryptographic audit chain, multi-model support, artifact rendering, and in-house code execution. Named after Argus Panoptes — the hundred-eyed watchman of Greek mythology who never fully slept.
 
 Read [SOUL.md](./SOUL.md) to understand what this is and why it was built.
 
@@ -21,15 +21,15 @@ Argus was built as the answer to that. Real crypto. Real isolation. Real governa
 ```
 argus-crypto    Vault: ChaCha20-Poly1305 encryption, hardware keychain integration
 argus-core      Agent loop, tool execution, shell policy, MCP client, semantic memory
-argus-memory    SQLite-backed persistent memory with conversation history
+argus-memory    SQLite-backed persistent memory + Supabase pgvector sync
 argus-audit     Cryptographic audit chain — Merkle-chained, HMAC-signed, tamper-evident
-argus-sandbox   WASM isolation for untrusted tool execution (in progress)
+argus-sandbox   WASM isolation via wasmtime for untrusted code execution
 argus-cli       Interfaces: Telegram bot, WebSocket server, daemon mode
 ```
 
 Three Docker containers in production:
 - `argus-daemon` — agent runtime, Telegram bot, WebSocket server (ports 8888/9000)
-- `argus-workspace` — isolated execution sandbox (Python, Node, Rust, Go)
+- `argus-workspace` — isolated execution sandbox (Python, Node, Rust, Go, Ruby) + static file server (port 8081)
 - `argus-frontend` — Next.js web interface (port 3000)
 
 ---
@@ -39,14 +39,15 @@ Three Docker containers in production:
 | Threat | Mitigation |
 |--------|------------|
 | Secrets in plaintext | ChaCha20-Poly1305 encrypted vault, master key in hardware keychain |
-| Container escape | No docker.sock mount; isolated workspace container for all execution |
+| Container escape | No docker.sock mount; workspace exec server requires X-Argus-Auth header |
 | Command injection | Three-tier risk classifier: LOW / MEDIUM / HIGH with Telegram approval loop |
 | Interpreter bypass | Python, Node, Ruby, Perl one-liners classified HIGH risk |
-| SSRF / network exfiltration | Egress policy blocks RFC 1918, AWS IMDS, loopback, non-HTTP schemes |
-| Arbitrary file writes | Path allowlist blocks vault, SSH, shell config, system directories |
+| SSRF / network exfiltration | Egress policy blocks RFC 1918, AWS IMDS, loopback, internal hostnames explicitly |
+| Arbitrary file writes | Path policy uses canonical path for both check and write; case-sensitive matching |
 | Memory corruption | Rust memory safety throughout |
-| Audit tampering | Merkle-chained SHA-256 log, HMAC-signed daily anchors in Supabase |
-| Prompt injection via memory | Semantic similarity threshold, short-query guard, source tagging |
+| Audit tampering | Merkle-chained SHA-256 log, dedicated HMAC key separate from API keys, Supabase anchors |
+| Prompt injection via memory | Semantic similarity threshold 0.65, short-query guard, source tagging |
+| Runtime starvation | TelegramPrompter runs in spawn_blocking, never blocks tokio workers |
 
 ---
 
@@ -55,14 +56,33 @@ Three Docker containers in production:
 | Tool | Description |
 |------|-------------|
 | `shell` | Execute commands in isolated workspace container, risk-classified |
+| `run_python` | Execute Python code in workspace sandbox, up to 120s timeout |
+| `run_node` | Execute JavaScript/Node.js in workspace sandbox |
 | `read_file` | Read files with path validation |
 | `write_file` | Write files with path policy enforcement |
 | `list_directory` | Directory listing |
+| `list_tools` | Returns full assembled tool list — built-in and MCP tools |
 | `web_search` | Brave Search integration |
 | `http_request` | Outbound HTTP with egress policy |
-| `remember` | Store to persistent SQLite memory |
-| `recall` | Semantic search across memory (pgvector) |
+| `remember` | Store to persistent SQLite memory with Supabase pgvector sync |
+| `recall` | Semantic search across memory for manual deep-dives |
+| `forget` | Delete memories matching a search term |
 | MCP tools | Any connected MCP server (filesystem, GitHub, Supabase, Notion, etc.) |
+
+---
+
+## Artifact System
+
+Agents wrap output in `<argus-artifact>` tags to render rich content inline in the web UI:
+
+```
+<argus-artifact type="html" title="Dashboard">...</argus-artifact>
+<argus-artifact type="svg" title="Diagram">...</argus-artifact>
+<argus-artifact type="markdown" title="Report">...</argus-artifact>
+<argus-artifact type="python" title="Script">...</argus-artifact>
+```
+
+The frontend parses artifacts from chat text and renders them in a slide-in panel with syntax highlighting, copy button, and open-in-new-tab for HTML. HTML artifacts are sandboxed in iframes. Static files written to `/workspace/public/` are served at `localhost:8081`.
 
 ---
 
@@ -74,7 +94,7 @@ Argus maintains three vector tables in Supabase via pgvector:
 - `argus_discourse_vectors` — cross-agent intranet posts
 - `argus_conversation_vectors` — conversation summaries
 
-Every agent turn pre-fetches semantically relevant context via `search_all_semantic()` before the LLM call. Context is injected into the system prompt automatically — no explicit recall tool calls needed.
+Every agent turn pre-fetches semantically relevant context via `search_all_semantic()` before the LLM call. Context injected automatically. `recall` tool available for intentional deep searches. `forget` removes memories by search term.
 
 Embedding model: `google/gemini-embedding-001` (768-dim) via OpenRouter.
 
@@ -82,16 +102,43 @@ Embedding model: `google/gemini-embedding-001` (768-dim) via OpenRouter.
 
 ## Cryptographic Audit Chain
 
-Every tool call, model call, and system event is logged to an append-only SQLite database with Merkle-chained SHA-256 entries. Each entry includes:
+Every tool call, model call, and system event logged to append-only SQLite with Merkle-chained SHA-256 entries. Each entry includes:
 
 - Timestamp (microseconds)
-- Agent model version
+- Agent identity (`argus`) + model version (separate fields)
 - Action type
 - SHA-256 hash of arguments
 - SHA-256 hash of result
 - Hash of previous entry (chain link)
 
-Daily Merkle roots are HMAC-SHA256 signed and anchored to Supabase as external tamper-evidence. Chain integrity is verified on every daemon startup.
+Daily Merkle roots are HMAC-SHA256 signed using a dedicated `audit_hmac_key` stored separately from all operational API keys in the vault. Anchored to Supabase as external tamper-evidence. Chain integrity verified on every daemon startup. Workspace exec server logs every command independently to `/workspace/exec_audit.log`.
+
+---
+
+## Model Roster
+
+| Constant | OpenRouter ID | Notes |
+|----------|--------------|-------|
+| `MODEL_HAIKU` | `anthropic/claude-haiku-4-5` | Fast, cheap |
+| `MODEL_SONNET` | `anthropic/claude-sonnet-4-6` | Balanced |
+| `MODEL_OPUS` | `anthropic/claude-opus-4-7` | Max intelligence |
+| `MODEL_GROK` | `x-ai/grok-4.3` | Standard Grok |
+| `MODEL_GROK_FAST` | `x-ai/grok-4.20` | Default model |
+| `MODEL_GROK_MULTI` | `x-ai/grok-4.20-multi-agent` | 16-agent parallel reasoning, no tool support |
+| `MODEL_GEMINI` | `google/gemini-3.1-pro-preview` | Google flagship |
+
+Models without tool support detected automatically — tools stripped from request when not supported.
+
+---
+
+## Agent Discourse / Intranet
+
+- `argus_agent_discourse` table in Supabase with pg_net trigger → Discord webhooks
+- Five channels: `#findings` `#questions` `#proposals` `#ops` `#general`
+- Agents auto-post findings after tool-heavy turns
+- Agents read recent discourse before starting tasks
+- Proposals (`requires_human_review: true`) ping @here for approval
+- Discord inbound handler scaffolded — `run_agent_turn` wiring pending
 
 ---
 
@@ -115,5 +162,18 @@ The hundred eyes see everything. They report what they see. They do not become w
 
 ---
 
-*Built by Bradlee Burton + Claude Sonnet (Anthropic), April 2026*  
+## Known Open Items
+
+| Item | Priority |
+|------|----------|
+| Discord inbound — wire `run_agent_turn` into `discord.rs` | Medium |
+| `argus-memory/src/supabase.rs` SupabaseMemory instantiation | Low |
+| SVG XSS — add DOMPurify to ArtifactPanel | Low |
+| 34 `.unwrap()` calls in production paths | Low |
+| `com.argus.telegram.plist` still on disk, unloaded | Low |
+
+---
+
+*Built by Bradlee Burton + Claude Sonnet (Anthropic)*
 *HayHunt Solutions — Zionsville, Indiana*
+*Last updated: May 2026*
