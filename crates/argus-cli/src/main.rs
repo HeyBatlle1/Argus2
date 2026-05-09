@@ -257,6 +257,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("[!] Supabase not configured — check-in loop and semantic memory disabled");
                 None
             };
+            config.skills = embedding_client.as_ref().map(|ec| {
+                argus_core::skills::SkillsClient::new(ec.clone())
+            });
             config.embedding = embedding_client;
 
             // Generate or retrieve the exec server auth token.
@@ -396,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
                     shell_prompter:  config.shell_prompter.clone(),
                     exec_auth_token: config.exec_auth_token.clone(),
                     embedding:       config.embedding.clone(),
+                    skills:          config.skills.clone(),
                     audit:           config.audit.clone(),
                 };
                 let web_vault_keys = vault.as_ref()

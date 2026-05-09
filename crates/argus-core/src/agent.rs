@@ -5,6 +5,7 @@ use crate::shell::ShellPolicy;
 use crate::tools::{self, MemoryBackend};
 use crate::embedding::EmbeddingClient;
 use crate::shell::PermissionPrompter;
+use crate::skills::{SkillsClient, NewSkill};
 use std::sync::Arc;
 use serde_json::Value;
 use uuid::Uuid;
@@ -229,6 +230,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional embedding client — when set, semantic pre-fetch runs before each turn
     pub embedding: Option<EmbeddingClient>,
+    /// Optional skills client — when set, relevant procedural skills are injected before each turn
+    pub skills: Option<SkillsClient>,
     /// Optional shell prompter — when set, HIGH risk commands are sent to Telegram for approval
     pub shell_prompter: Option<Arc<dyn PermissionPrompter>>,
     /// Optional audit chain — when set, all tool calls and model calls are cryptographically logged
@@ -248,6 +251,7 @@ impl AgentConfig {
             temperature: 0.7,
             brave_search_key,
             embedding: None,
+            skills: None,
             shell_prompter: None,
             audit: None,
             exec_auth_token: None,
@@ -368,6 +372,25 @@ where
         (None, None)
     };
 
+    // ── Skill prefetch ────────────────────────────────────────────────────
+    // Retrieve procedural skills relevant to this message and inject as guidance.
+    // Runs in parallel with semantic memory but only when skills client is configured.
+    let skill_context = if let Some(ref sc) = config.skills {
+        match sc.search_relevant(user_message, 0.60, 4).await {
+            Ok(skills) if !skills.is_empty() => {
+                eprintln!("[skills] {} relevant skill(s) found", skills.len());
+                SkillsClient::format_for_prompt(&skills)
+            }
+            Ok(_) => String::new(),
+            Err(e) => {
+                eprintln!("[skills] Search failed (continuing without): {}", e);
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
+
     let mut tool_schemas: Vec<Value> = Vec::new();
     let mut registered_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -420,13 +443,18 @@ where
         });
     }
 
-    // System prompt with semantic context injected
+    // System prompt with semantic context and skills injected
     let history_context = format_history_block(history);
-    let system_prompt = build_system_prompt(
+    let mut system_prompt = build_system_prompt(
         semantic_context.as_deref(),
         discourse_context.as_deref(),
         history_context.as_deref(),
     );
+    // Skills go after memory context — procedural before factual reads more naturally
+    if !skill_context.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&skill_context);
+    }
 
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": system_prompt}),
@@ -435,6 +463,8 @@ where
         messages.push(serde_json::json!({"role": msg.role, "content": msg.content}));
     }
     messages.push(serde_json::json!({"role": "user", "content": user_message}));
+
+    let mut tool_call_count: usize = 0;
 
     for _round in 0..MAX_TOOL_ROUNDS {
         let mut req_body = serde_json::json!({
@@ -488,10 +518,19 @@ where
                     );
                 }
 
+                // Background skill reflection — fires after tool-heavy turns
+                maybe_reflect_on_skill(
+                    tool_call_count, config.skills.clone(),
+                    config.api_key.clone(), config.api_url.clone(), config.model.clone(),
+                    http_client.clone(), user_message.to_string(), content.clone(),
+                );
+
                 on_event(AgentEvent::Response(content.clone()));
                 return Ok(content);
             }
         };
+
+        tool_call_count += tool_calls.len();
 
         messages.push(message.clone());
 
@@ -642,6 +681,113 @@ where
         );
     }
 
+    // Background skill reflection — fires after tool-heavy turns (synthesis path)
+    maybe_reflect_on_skill(
+        tool_call_count, config.skills.clone(),
+        config.api_key.clone(), config.api_url.clone(), config.model.clone(),
+        http_client.clone(), user_message.to_string(), content.clone(),
+    );
+
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
+}
+
+/// Spawn a background task that asks Haiku to reflect on whether a reusable skill
+/// was discovered during a tool-heavy turn. If yes, creates it in argus_skills.
+/// Fires only when tool_call_count >= 3 and a SkillsClient is configured.
+/// Never blocks — failures are logged and silently discarded.
+fn maybe_reflect_on_skill(
+    tool_call_count: usize,
+    skills: Option<SkillsClient>,
+    api_key: String,
+    api_url: String,
+    model_used: String,
+    http: reqwest::Client,
+    user_msg: String,
+    response: String,
+) {
+    if tool_call_count < 3 {
+        return;
+    }
+    let Some(sc) = skills else { return };
+
+    tokio::spawn(async move {
+        let response_preview = if response.len() > 400 {
+            format!("{}...", &response[..400])
+        } else {
+            response.clone()
+        };
+
+        let reflection_prompt = format!(
+            "A complex agent turn just completed ({tool_call_count} tool calls).\n\n\
+             User asked: {user_msg}\n\n\
+             Agent produced: {response_preview}\n\n\
+             Did this turn discover a non-obvious, genuinely reusable procedure \
+             worth documenting for future agent instances?\n\n\
+             If yes, respond with exactly:\n\
+             {{\"create_skill\": true, \"skill_name\": \"brief name (5 words max)\", \
+             \"trigger_description\": \"when another agent should use this\", \
+             \"procedure_steps\": \"step-by-step markdown with failure modes\"}}\n\n\
+             If no: {{\"create_skill\": false}}\n\n\
+             Be highly selective. Only document genuinely reusable procedures, \
+             not one-off solutions specific to this task.",
+        );
+
+        let body = serde_json::json!({
+            "model": MODEL_HAIKU,   // Haiku: fast, cheap, sufficient for reflection
+            "messages": [{"role": "user", "content": reflection_prompt}],
+            "temperature": 0.3,
+            "max_tokens": 500,
+        });
+
+        let resp = match http
+            .post(&api_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => { eprintln!("[skills] Reflection API call failed: {}", e); return; }
+        };
+
+        let json: serde_json::Value = match resp.json().await {
+            Ok(j) => j,
+            Err(e) => { eprintln!("[skills] Reflection parse failed: {}", e); return; }
+        };
+
+        let content = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("");
+
+        // Extract the JSON object from the response (may be wrapped in prose)
+        let (start, end) = match (content.find('{'), content.rfind('}')) {
+            (Some(s), Some(e)) if e >= s => (s, e),
+            _ => return,
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&content[start..=end]) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        if parsed["create_skill"].as_bool() != Some(true) { return; }
+
+        let skill_name = parsed["skill_name"].as_str().unwrap_or("").to_string();
+        let trigger    = parsed["trigger_description"].as_str().unwrap_or("").to_string();
+        let steps      = parsed["procedure_steps"].as_str().unwrap_or("").to_string();
+
+        if skill_name.is_empty() || trigger.is_empty() || steps.is_empty() { return; }
+
+        match sc.create_skill(NewSkill {
+            skill_name: skill_name.clone(),
+            trigger_description: trigger,
+            procedure_steps: steps,
+            model_created_by: model_used,
+            metadata: None,
+        }).await {
+            Ok(name) => eprintln!("[skills] New skill acquired: \"{}\"", name),
+            Err(e)   => eprintln!("[skills] Skill creation failed: {}", e),
+        }
+    });
 }

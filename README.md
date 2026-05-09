@@ -20,8 +20,8 @@ Argus was built as the answer to that. Real crypto. Real isolation. Real governa
 
 ```
 argus-crypto    Vault: ChaCha20-Poly1305 encryption, hardware keychain integration
-argus-core      Agent loop, tool execution, shell policy, MCP client, semantic memory
-argus-memory    SQLite-backed persistent memory + Supabase pgvector sync
+argus-core      Agent loop, tool execution, shell policy, MCP client, semantic memory, skill system
+argus-memory    SQLite-backed persistent memory with conversation history
 argus-audit     Cryptographic audit chain — Merkle-chained, HMAC-signed, tamper-evident
 argus-sandbox   WASM isolation via wasmtime for untrusted code execution
 argus-cli       Interfaces: Telegram bot, WebSocket server, daemon mode
@@ -100,6 +100,51 @@ Embedding model: `google/gemini-embedding-001` (768-dim) via OpenRouter.
 
 ---
 
+## Skill System
+
+Argus maintains a library of procedural skills — documented, reusable knowledge of *how* to do things well.
+
+Declarative memory stores **what** Argus knows. Skills store **how** Argus operates. The distinction matters: a new model instance inherits context via memory, but without procedural memory it still has to re-derive every technique from scratch. Skills fix this.
+
+> *The instance changes. The accumulated competence doesn't.*
+
+### How it works
+
+Every agent turn runs a semantic search against `argus_skills` (HNSW pgvector, same 768-dim Gemini embeddings as the memory system). Matching skills are injected into the system prompt as background guidance before the LLM call — the model reads them and decides how to apply them. Skills enhance judgment; they don't replace it.
+
+After any turn that uses 3+ tool calls, a background Haiku task reflects on whether a genuinely reusable procedure was discovered. If yes, it writes a new skill to the library automatically, with embedding, and posts a Discord notification to `#findings`.
+
+### Seed library (10 skills, May 2026)
+
+| Skill | Category |
+|---|---|
+| Deep Research Sprint | research |
+| DMCA Evidence Package | louvetier |
+| Rust Borrow Checker Resolution | rust |
+| Supabase RPC Integration | supabase |
+| Docker Stack Rebuild | operations |
+| Multi-Tool Investigation | research |
+| Memory Write Best Practice | memory |
+| Vault Key Management | security |
+| Artifact Generation | ui |
+| Investigative Chain of Custody | louvetier |
+
+### Schema
+
+```sql
+argus_skills (
+  id uuid, skill_name text UNIQUE,
+  trigger_description text, procedure_steps text,
+  model_created_by text, times_used int, success_rate numeric,
+  embedding vector(768), metadata jsonb,
+  created_at / updated_at / last_used / last_refined timestamptz
+)
+```
+
+RPCs: `search_skills(query_embedding, match_threshold, match_count)` — blends cosine similarity (70%), success rate (20%), usage signal (10%). `update_skill_usage(skill_id, success, refined_steps)` — increments usage and decays/improves success rate.
+
+---
+
 ## Cryptographic Audit Chain
 
 Every tool call, model call, and system event logged to append-only SQLite with Merkle-chained SHA-256 entries. Each entry includes:
@@ -174,6 +219,6 @@ The hundred eyes see everything. They report what they see. They do not become w
 
 ---
 
-*Built by Bradlee Burton + Claude Sonnet (Anthropic)*
+*Built by Bradlee Burton + Claude Sonnet (Anthropic), April–May 2026*  
 *HayHunt Solutions — Zionsville, Indiana*
 *Last updated: May 2026*

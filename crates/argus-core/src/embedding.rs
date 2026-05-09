@@ -222,6 +222,16 @@ impl EmbeddingClient {
         Some(lines.join("\n\n"))
     }
 
+    /// Delegation for modules (e.g. SkillsClient) that share this Supabase connection
+    /// without needing their own client instance.
+    pub async fn supabase_rpc(&self, function: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.supabase.rpc(function, params).await
+    }
+
+    pub async fn supabase_insert(&self, table: &str, data: &serde_json::Value) -> Result<(), String> {
+        self.supabase.insert(table, data).await
+    }
+
     pub fn format_discourse_block(posts: &[DiscourseRecord]) -> Option<String> {
         if posts.is_empty() { return None; }
 
