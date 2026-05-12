@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
 
         Some(Commands::Discord) => {
             let vault = vault.as_mut().unwrap();
-            let config = load_agent_config(vault, None)?;
+            let mut config = load_agent_config(vault, None)?;
             let bot_token = vault.retrieve("discord_bot_token").ok()
                 .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok());
             let channel_id = vault.retrieve("discord_channel_id").ok()
@@ -204,8 +204,30 @@ async fn main() -> anyhow::Result<()> {
                      argus vault set discord_bot_token  YOUR_TOKEN\n  \
                      argus vault set discord_channel_id YOUR_CHANNEL_ID"
                 ))?;
+
+            // Wire Supabase for discourse context + webhook lookup
+            let supabase_url = vault.retrieve("supabase_argus_url").ok()
+                .or_else(|| std::env::var("SUPABASE_ARGUS_URL").ok());
+            let supabase_key = vault.retrieve("supabase_argus_service_key").ok()
+                .or_else(|| std::env::var("SUPABASE_ARGUS_SERVICE_KEY").ok());
+            let supabase = match (supabase_url, supabase_key) {
+                (Some(url), Some(key)) => {
+                    let sb = argus_core::supabase::SupabaseClient::new(url, key);
+                    // Also enable semantic memory in this mode
+                    let ec = argus_core::EmbeddingClient::new(&config.api_key, sb.clone());
+                    config.skills = Some(argus_core::skills::SkillsClient::new(ec.clone()));
+                    config.embedding = Some(ec);
+                    println!("[+] Supabase connected — discourse context + webhook lookup enabled");
+                    Some(sb)
+                }
+                _ => {
+                    println!("[!] Supabase not configured — discourse context disabled");
+                    None
+                }
+            };
+
             println!("[+] Starting Discord bot...");
-            discord::run_discord_bot(discord_cfg, config).await?;
+            discord::run_discord_bot(discord_cfg, config, supabase).await?;
         }
 
         Some(Commands::Daemon) => {

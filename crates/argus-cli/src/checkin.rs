@@ -1,24 +1,28 @@
-//! Autonomous check-in loop
+//! Autonomous check-in loop — alert-only mode
 //!
-//! On startup, reads argus_checkin_config from Supabase.
 //! Fires every interval_minutes, respects quiet hours.
-//! Each check-in:
-//!   1. Collects system health
-//!   2. Reads recent memories from Supabase
-//!   3. Checks upcoming schedule
-//!   4. Formats a brief Telegram message
-//!   5. Sends it
-//!   6. Writes to argus_checkin_log
+//! Sends a Telegram message ONLY when something needs attention:
+//!   • Disk usage > 80%
+//!   • Memory usage > 90%
+//!   • Any container is unhealthy or exited unexpectedly
+//!
+//! Additionally sends a daily health summary once per day around midnight
+//! (within the next check-in window after 00:00) — one message regardless
+//! of health status, so there's always a daily heartbeat.
+//!
+//! This reduces Telegram noise from ~12 messages/day to 1/day (daily summary)
+//! unless something actually needs attention.
 
 use argus_core::supabase::{CheckinLogEntry, SupabaseClient};
-use chrono::{Local, NaiveTime};
+use chrono::{Local, NaiveDate, NaiveTime};
 use reqwest::Client;
 use tokio::time::{sleep, Duration};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
+const DISK_ALERT_PCT: u8 = 80;
+const MEM_ALERT_PCT: u8 = 90;
 
 /// Entry point — spawns the check-in loop as a background task.
-/// Returns immediately; caller must ensure the runtime stays alive.
 pub fn spawn_checkin_loop(
     supabase: SupabaseClient,
     bot_token: String,
@@ -30,30 +34,54 @@ pub fn spawn_checkin_loop(
 }
 
 async fn run_checkin_loop(supabase: SupabaseClient, bot_token: String, chat_id: i64) {
-    // Read config once at startup; refresh each cycle so config changes take effect
     let client = Client::new();
+    let mut last_daily: Option<NaiveDate> = None;
 
     loop {
         let config = supabase.read_checkin_config().await;
 
         if config.telegram_enabled && !in_quiet_hours(&config) {
             let health = collect_system_health().await;
-            let schedule_summary = read_schedule_summary(&supabase).await;
-            let message = format_checkin_message(&health, &schedule_summary, &config.checkin_type);
+            let today = Local::now().date_naive();
 
-            if let Err(e) = send_telegram_message(&client, &bot_token, chat_id, &message).await {
-                eprintln!("[checkin] Failed to send Telegram message: {}", e);
-            } else {
-                let entry = CheckinLogEntry {
-                    checkin_type: config.checkin_type.clone(),
-                    status: "sent".to_string(),
-                    message_sent: message,
-                    system_health: Some(serde_json::to_value(&health).unwrap_or_default()),
-                };
-                if let Err(e) = supabase.write_checkin_log(&entry).await {
-                    eprintln!("[checkin] Failed to write checkin log: {}", e);
+            let needs_alert = health.disk_pct > DISK_ALERT_PCT
+                || health.mem_pct > MEM_ALERT_PCT
+                || health.has_unhealthy_container;
+
+            // Daily summary fires once per calendar day (first check-in after midnight)
+            let needs_daily = last_daily.map_or(true, |d| d < today);
+
+            if needs_alert || needs_daily {
+                let schedule_summary = read_schedule_summary(&supabase).await;
+                let message = format_checkin_message(
+                    &health,
+                    &schedule_summary,
+                    needs_alert,
+                    needs_daily,
+                );
+
+                if let Err(e) = send_telegram_message(&client, &bot_token, chat_id, &message).await
+                {
+                    eprintln!("[checkin] Failed to send Telegram message: {}", e);
+                } else {
+                    if needs_daily {
+                        last_daily = Some(today);
+                    }
+
+                    let entry = CheckinLogEntry {
+                        checkin_type: config.checkin_type.clone(),
+                        status: if needs_alert { "alert" } else { "daily" }.to_string(),
+                        message_sent: message,
+                        system_health: Some(
+                            serde_json::to_value(&health).unwrap_or_default(),
+                        ),
+                    };
+                    if let Err(e) = supabase.write_checkin_log(&entry).await {
+                        eprintln!("[checkin] Failed to write checkin log: {}", e);
+                    }
                 }
             }
+            // else: everything healthy, not daily time — silent pass
         }
 
         let interval = Duration::from_secs(config.interval_minutes.max(1) as u64 * 60);
@@ -61,11 +89,10 @@ async fn run_checkin_loop(supabase: SupabaseClient, bot_token: String, chat_id: 
     }
 }
 
-/// Returns true if current local time falls within the configured quiet hours.
 fn in_quiet_hours(config: &argus_core::supabase::CheckinConfig) -> bool {
     let now = Local::now().time();
     let start_str = config.quiet_hours_start.as_deref().unwrap_or("23:00");
-    let end_str   = config.quiet_hours_end.as_deref().unwrap_or("07:00");
+    let end_str = config.quiet_hours_end.as_deref().unwrap_or("07:00");
 
     let parse = |s: &str| -> Option<NaiveTime> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
@@ -80,7 +107,6 @@ fn in_quiet_hours(config: &argus_core::supabase::CheckinConfig) -> bool {
         _ => return false,
     };
 
-    // Quiet window crosses midnight (e.g. 23:00 → 07:00)
     if start > end {
         now >= start || now < end
     } else {
@@ -88,12 +114,20 @@ fn in_quiet_hours(config: &argus_core::supabase::CheckinConfig) -> bool {
     }
 }
 
+// ── System health ──────────────────────────────────────────────────────────
+
 #[derive(Debug, serde::Serialize)]
 struct SystemHealth {
     timestamp: String,
     containers: String,
     disk: String,
     memory: String,
+    /// Percentage of disk used (0–100).
+    disk_pct: u8,
+    /// Percentage of memory used (0–100).
+    mem_pct: u8,
+    /// True if any container is unhealthy or exited unexpectedly.
+    has_unhealthy_container: bool,
 }
 
 async fn collect_system_health() -> SystemHealth {
@@ -101,11 +135,7 @@ async fn collect_system_health() -> SystemHealth {
     use tokio::time::{timeout, Duration};
 
     async fn run(cmd: &'static str) -> String {
-        match timeout(
-            Duration::from_secs(3),
-            Command::new("sh").arg("-c").arg(cmd).output(),
-        )
-        .await
+        match timeout(Duration::from_secs(3), Command::new("sh").arg("-c").arg(cmd).output()).await
         {
             Ok(Ok(o)) if o.status.success() => {
                 String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -114,9 +144,8 @@ async fn collect_system_health() -> SystemHealth {
         }
     }
 
-    // Linux /proc/meminfo — same logic used in the web.rs sentry handler.
-    // Replaces the macOS-only `vm_stat` that never ran in the daemon container.
-    let memory = {
+    // ── Memory ─────────────────────────────────────────────────────────────
+    let (memory, mem_pct) = {
         let content = tokio::fs::read_to_string("/proc/meminfo")
             .await
             .unwrap_or_default();
@@ -124,9 +153,7 @@ async fn collect_system_health() -> SystemHealth {
         let mut available_kb: u64 = 0;
         for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 2 {
-                continue;
-            }
+            if parts.len() < 2 { continue; }
             match parts[0] {
                 "MemTotal:"     => { total_kb     = parts[1].parse().unwrap_or(0); }
                 "MemAvailable:" => { available_kb = parts[1].parse().unwrap_or(0); }
@@ -134,7 +161,7 @@ async fn collect_system_health() -> SystemHealth {
             }
         }
         if total_kb == 0 {
-            "unavailable".to_string()
+            ("unavailable".to_string(), 0u8)
         } else {
             let fmt = |kb: u64| -> String {
                 if kb >= 1_048_576 {
@@ -144,22 +171,92 @@ async fn collect_system_health() -> SystemHealth {
                 }
             };
             let used = total_kb.saturating_sub(available_kb);
-            format!("{} used, {} free", fmt(used), fmt(available_kb))
+            let pct = ((used as f64 / total_kb as f64) * 100.0).round() as u8;
+            (format!("{} used, {} free ({}%)", fmt(used), fmt(available_kb), pct), pct)
         }
     };
 
-    let (containers, disk) = tokio::join!(
-        run("docker ps --format '{{.Names}} ({{.Status}})' 2>/dev/null | head -5"),
-        run("df -h / 2>/dev/null | tail -1 | awk '{print $3\"/\"$2\" used, \"$4\" free\"}'"),
-    );
+    // ── Disk ───────────────────────────────────────────────────────────────
+    let (disk, disk_pct) = {
+        let summary = run(
+            "df -h / 2>/dev/null | tail -1 | awk '{print $3\"/\"$2\" used, \"$4\" free\"}'",
+        )
+        .await;
+        let pct_str = run("df / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%'").await;
+        let pct = pct_str.parse::<u8>().unwrap_or(0);
+        let display = if pct > 0 {
+            format!("{} ({}%)", summary, pct)
+        } else {
+            summary
+        };
+        (display, pct)
+    };
+
+    // ── Containers ─────────────────────────────────────────────────────────
+    let containers = run(
+        "docker ps --format '{{.Names}} ({{.Status}})' 2>/dev/null | head -10",
+    )
+    .await;
+
+    let has_unhealthy_container = containers
+        .lines()
+        .any(|line| {
+            let l = line.to_lowercase();
+            l.contains("unhealthy") || l.contains("exited") || l.contains("restarting")
+        });
 
     SystemHealth {
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string(),
         containers,
         disk,
         memory,
+        disk_pct,
+        mem_pct,
+        has_unhealthy_container,
     }
 }
+
+// ── Formatting ─────────────────────────────────────────────────────────────
+
+fn format_checkin_message(
+    health: &SystemHealth,
+    schedule: &str,
+    is_alert: bool,
+    is_daily: bool,
+) -> String {
+    let mut msg = if is_alert {
+        format!("⚠️ Argus Alert — {}\n\n", health.timestamp)
+    } else {
+        format!("✅ Argus Daily Summary — {}\n\n", health.timestamp)
+    };
+
+    // Alert details — be specific about what's wrong
+    if health.disk_pct > DISK_ALERT_PCT {
+        msg.push_str(&format!("🔴 Disk: {} — ABOVE {}% THRESHOLD\n", health.disk, DISK_ALERT_PCT));
+    } else if is_daily {
+        msg.push_str(&format!("Disk: {}\n", health.disk));
+    }
+
+    if health.mem_pct > MEM_ALERT_PCT {
+        msg.push_str(&format!("🔴 Memory: {} — ABOVE {}% THRESHOLD\n", health.memory, MEM_ALERT_PCT));
+    } else if is_daily {
+        msg.push_str(&format!("Memory: {}\n", health.memory));
+    }
+
+    if health.has_unhealthy_container {
+        msg.push_str(&format!("\n🔴 Container issue detected:\n{}\n", health.containers));
+    } else if is_daily {
+        msg.push_str(&format!("\nContainers:\n{}\n", health.containers));
+    }
+
+    if !schedule.is_empty() && is_daily {
+        msg.push_str(&format!("\nUpcoming:\n{}", schedule));
+    }
+
+    msg
+}
+
+// ── Schedule ───────────────────────────────────────────────────────────────
 
 async fn read_schedule_summary(supabase: &SupabaseClient) -> String {
     match supabase.read_upcoming_schedule().await {
@@ -171,7 +268,7 @@ async fn read_schedule_summary(supabase: &SupabaseClient) -> String {
             };
             let items: Vec<String> = arr.iter().take(3).filter_map(|r| {
                 let title = r["title"].as_str().or(r["task"].as_str())?;
-                let time  = r["scheduled_time"].as_str().unwrap_or("");
+                let time = r["scheduled_time"].as_str().unwrap_or("");
                 Some(format!("• {} at {}", title, time))
             }).collect();
             if items.is_empty() { String::new() } else { items.join("\n") }
@@ -179,21 +276,7 @@ async fn read_schedule_summary(supabase: &SupabaseClient) -> String {
     }
 }
 
-fn format_checkin_message(health: &SystemHealth, schedule: &str, checkin_type: &str) -> String {
-    let mut msg = format!("Argus check-in — {}\n\n", health.timestamp);
-
-    if checkin_type != "silent" {
-        msg.push_str(&format!("Containers:\n{}\n\n", health.containers));
-        msg.push_str(&format!("Disk: {}\n", health.disk));
-        msg.push_str(&format!("Memory: {}\n", health.memory));
-    }
-
-    if !schedule.is_empty() {
-        msg.push_str(&format!("\nUpcoming:\n{}", schedule));
-    }
-
-    msg
-}
+// ── Telegram ───────────────────────────────────────────────────────────────
 
 async fn send_telegram_message(
     client: &Client,
@@ -206,7 +289,7 @@ async fn send_telegram_message(
         .post(&url)
         .json(&serde_json::json!({
             "chat_id": chat_id,
-            "text": text,
+            "text":    text,
         }))
         .send()
         .await
