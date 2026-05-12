@@ -50,14 +50,18 @@ impl SupabaseMemory {
         format!("{}/rest/v1/{}", self.base_url, table)
     }
 
-    fn headers(&self) -> reqwest::header::HeaderMap {
+    fn headers(&self) -> Result<reqwest::header::HeaderMap, SupabaseError> {
         use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
         let mut h = HeaderMap::new();
         let bearer = format!("Bearer {}", self.jwt);
-        h.insert(AUTHORIZATION, HeaderValue::from_str(&bearer).unwrap());
-        h.insert("apikey", HeaderValue::from_str(&self.jwt).unwrap());
+        let auth_val = HeaderValue::from_str(&bearer)
+            .map_err(|_| SupabaseError::Parse("Invalid characters in auth token".into()))?;
+        let key_val = HeaderValue::from_str(&self.jwt)
+            .map_err(|_| SupabaseError::Parse("Invalid characters in API key".into()))?;
+        h.insert(AUTHORIZATION, auth_val);
+        h.insert("apikey", key_val);
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        h
+        Ok(h)
     }
 
     async fn check(&self, resp: reqwest::Response) -> Result<reqwest::Response, SupabaseError> {
@@ -84,7 +88,7 @@ impl SupabaseMemory {
         let resp = self
             .client
             .get(&url)
-            .headers(self.headers())
+            .headers(self.headers()?)
             .send()
             .await?;
         let resp = self.check(resp).await?;
@@ -119,7 +123,7 @@ impl SupabaseMemory {
         let resp = self
             .client
             .post(&self.rest_url("argus_memories"))
-            .headers(self.headers())
+            .headers(self.headers()?)
             .header("Prefer", "return=minimal")
             .json(&payload)
             .send()
@@ -137,7 +141,7 @@ impl SupabaseMemory {
             limit
         );
 
-        let resp = self.client.get(&url).headers(self.headers()).send().await?;
+        let resp = self.client.get(&url).headers(self.headers()?).send().await?;
         let resp = self.check(resp).await?;
 
         let rows: serde_json::Value = resp
@@ -172,7 +176,7 @@ impl SupabaseMemory {
         let resp = self
             .client
             .delete(&url)
-            .headers(self.headers())
+            .headers(self.headers()?)
             .header("Prefer", "return=minimal,count=exact")
             .send()
             .await?;
