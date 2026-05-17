@@ -19,7 +19,19 @@ export function ConversationPanel({ onOpenArtifact }: Props) {
           THE CONVERSATION
         </span>
       </div>
-      <MessageList onOpenArtifact={onOpenArtifact} />
+      <div className="relative flex-1 min-h-0">
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            backgroundImage: "url('/logo.svg')",
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
+            backgroundSize: '280px',
+            opacity: 0.05,
+          }}
+        />
+        <MessageList onOpenArtifact={onOpenArtifact} />
+      </div>
       <InputArea />
     </div>
   );
