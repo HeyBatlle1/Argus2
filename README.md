@@ -8,6 +8,16 @@ Read [SOUL.md](./SOUL.md) to understand what this is and why it was built.
 
 ---
 
+## Why Argus?
+
+Most AI agents store API keys in plaintext `.env` files and run tools directly on your machine. The ecosystem built everything fast and called it production.
+
+Argus was built as the answer to that: real crypto (ChaCha20-Poly1305 + hardware keychain), real isolation (WASM sandbox for untrusted code), a cryptographic audit trail on every action, and a governance layer that requires human approval before any action with real-world consequences.
+
+The agent has a soul document. It's not marketing — read [SOUL.md](./SOUL.md).
+
+---
+
 ## What Makes This Different
 
 The AI agent space built everything in JavaScript, stored API keys in plaintext environment files, and acted surprised when things went wrong.
@@ -119,7 +129,7 @@ After any turn that uses 3+ tool calls, a background Haiku task reflects on whet
 | Skill | Category |
 |---|---|
 | Deep Research Sprint | research |
-| DMCA Evidence Package | louvetier |
+| DMCA Evidence Package | investigation |
 | Rust Borrow Checker Resolution | rust |
 | Supabase RPC Integration | supabase |
 | Docker Stack Rebuild | operations |
@@ -127,7 +137,7 @@ After any turn that uses 3+ tool calls, a background Haiku task reflects on whet
 | Memory Write Best Practice | memory |
 | Vault Key Management | security |
 | Artifact Generation | ui |
-| Investigative Chain of Custody | louvetier |
+| Investigative Chain of Custody | investigation |
 
 ### Schema
 
@@ -219,6 +229,5 @@ The hundred eyes see everything. They report what they see. They do not become w
 
 ---
 
-*Built by Bradlee Burton + Claude Sonnet (Anthropic), April–May 2026*  
-*HayHunt Solutions — Zionsville, Indiana*
+*Built by Bradlee Burton (HayHunt Solutions) + Claude Sonnet (Anthropic), April–May 2026*  
 *Last updated: May 2026*

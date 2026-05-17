@@ -8,6 +8,7 @@ import { dracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Artifact } from '@/lib/types';
+import DOMPurify from 'dompurify';
 import { artifactLabel, isVisualArtifact } from '@/lib/artifacts';
 
 interface Props {
@@ -57,7 +58,7 @@ export function ArtifactPanel({ artifacts, initialIndex = 0, onClose }: Props) {
           <div
             className="w-full h-full flex items-center justify-center p-6 overflow-auto"
             style={{ background: '#fafafa' }}
-            dangerouslySetInnerHTML={{ __html: artifact.content }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(artifact.content) }}
           />
         );
 
