@@ -5,6 +5,7 @@
 A production-grade AI agent built in Rust. Vault-backed secrets, sandboxed execution, cryptographic audit chain, multi-model support, artifact rendering, and in-house code execution. Named after Argus Panoptes — the hundred-eyed watchman of Greek mythology who never fully slept.
 
 Read [SOUL.md](./SOUL.md) to understand what this is and why it was built.
+Read [THEORY.md](./THEORY.md) to understand why the intranet and social loop matter.
 
 ---
 
@@ -124,34 +125,22 @@ Every agent turn runs a semantic search against `argus_skills` (HNSW pgvector, s
 
 After any turn that uses 3+ tool calls, a background Haiku task reflects on whether a genuinely reusable procedure was discovered. If yes, it writes a new skill to the library automatically, with embedding, and posts a Discord notification to `#findings`.
 
-### Seed library (10 skills, May 2026)
+---
 
-| Skill | Category |
-|---|---|
-| Deep Research Sprint | research |
-| DMCA Evidence Package | investigation |
-| Rust Borrow Checker Resolution | rust |
-| Supabase RPC Integration | supabase |
-| Docker Stack Rebuild | operations |
-| Multi-Tool Investigation | research |
-| Memory Write Best Practice | memory |
-| Vault Key Management | security |
-| Artifact Generation | ui |
-| Investigative Chain of Custody | investigation |
+## Agent Discourse / Intranet
 
-### Schema
+Argus runs a persistent social loop — not a pipeline.
 
-```sql
-argus_skills (
-  id uuid, skill_name text UNIQUE,
-  trigger_description text, procedure_steps text,
-  model_created_by text, times_used int, success_rate numeric,
-  embedding vector(768), metadata jsonb,
-  created_at / updated_at / last_used / last_refined timestamptz
-)
-```
+See [THEORY.md](./THEORY.md) for the full explanation. The short version:
 
-RPCs: `search_skills(query_embedding, match_threshold, match_count)` — blends cosine similarity (70%), success rate (20%), usage signal (10%). `update_skill_usage(skill_id, success, refined_steps)` — increments usage and decays/improves success rate.
+- `argus_agent_discourse` table in Supabase with pg_net trigger → Discord webhooks
+- Five channels: `#findings` `#questions` `#proposals` `#ops` `#general`
+- Agents auto-post findings after tool-heavy turns
+- Agents read recent discourse before starting tasks
+- Proposals (`requires_human_review: true`) ping @here for human approval
+- Discord inbound routes messages back to the agent
+
+The result: a system that genuinely compounds. The environment gets smarter across sessions, across model swaps, across time. This is not a property of any individual model. It is a property of the system.
 
 ---
 
@@ -160,13 +149,12 @@ RPCs: `search_skills(query_embedding, match_threshold, match_count)` — blends 
 Every tool call, model call, and system event logged to append-only SQLite with Merkle-chained SHA-256 entries. Each entry includes:
 
 - Timestamp (microseconds)
-- Agent identity (`argus`) + model version (separate fields)
+- Agent identity + model version (separate fields)
 - Action type
-- SHA-256 hash of arguments
-- SHA-256 hash of result
+- SHA-256 hash of arguments and result
 - Hash of previous entry (chain link)
 
-Daily Merkle roots are HMAC-SHA256 signed using a dedicated `audit_hmac_key` stored separately from all operational API keys in the vault. Anchored to Supabase as external tamper-evidence. Chain integrity verified on every daemon startup. Workspace exec server logs every command independently to `/workspace/exec_audit.log`.
+Daily Merkle roots HMAC-SHA256 signed with a dedicated `audit_hmac_key` — separate from all operational API keys. Anchored to Supabase as external tamper-evidence. Chain integrity verified on every daemon startup.
 
 ---
 
@@ -179,21 +167,10 @@ Daily Merkle roots are HMAC-SHA256 signed using a dedicated `audit_hmac_key` sto
 | `MODEL_OPUS` | `anthropic/claude-opus-4-7` | Max intelligence |
 | `MODEL_GROK` | `x-ai/grok-4.3` | Standard Grok |
 | `MODEL_GROK_FAST` | `x-ai/grok-4.20` | Default model |
-| `MODEL_GROK_MULTI` | `x-ai/grok-4.20-multi-agent` | 16-agent parallel reasoning, no tool support |
+| `MODEL_GROK_MULTI` | `x-ai/grok-4.20-multi-agent` | 16-agent parallel reasoning |
 | `MODEL_GEMINI` | `google/gemini-3.1-pro-preview` | Google flagship |
 
 Models without tool support detected automatically — tools stripped from request when not supported.
-
----
-
-## Agent Discourse / Intranet
-
-- `argus_agent_discourse` table in Supabase with pg_net trigger → Discord webhooks
-- Five channels: `#findings` `#questions` `#proposals` `#ops` `#general`
-- Agents auto-post findings after tool-heavy turns
-- Agents read recent discourse before starting tasks
-- Proposals (`requires_human_review: true`) ping @here for approval
-- Discord inbound handler scaffolded — `run_agent_turn` wiring pending
 
 ---
 
@@ -205,13 +182,15 @@ Models without tool support detected automatically — tools stripped from reque
 
 Reads secrets from encrypted vault, exports to Docker environment, starts all three containers. No plaintext `.env` files. Ever.
 
+See [docs/SETUP.md](./docs/SETUP.md) for full setup instructions.
+
 ---
 
 ## Identity and Ethics
 
 Argus is a tool with an ethical framework, not just a capability set.
 
-The **Moral Compass** and **Constitutional Framework** sections of [SOUL.md](./SOUL.md) define what Argus will and won't do — including when operating near dark content or in forensic intelligence contexts. Those principles travel with every fork of this codebase.
+The **Moral Compass** and **Constitutional Framework** sections of [SOUL.md](./SOUL.md) define what Argus will and won't do. Those principles travel with every fork of this codebase.
 
 The hundred eyes see everything. They report what they see. They do not become what they observe.
 
@@ -223,11 +202,9 @@ The hundred eyes see everything. They report what they see. They do not become w
 |------|----------|
 | Discord inbound — wire `run_agent_turn` into `discord.rs` | Medium |
 | `argus-memory/src/supabase.rs` SupabaseMemory instantiation | Low |
-| SVG XSS — add DOMPurify to ArtifactPanel | Low |
 | 34 `.unwrap()` calls in production paths | Low |
-| `com.argus.telegram.plist` still on disk, unloaded | Low |
 
 ---
 
-*Built by Bradlee Burton (HayHunt Solutions) + Claude Sonnet (Anthropic), April–May 2026*  
-*Last updated: May 2026*
+*Built by HayHunt Solutions + Claude Sonnet (Anthropic), 2026*
+*MIT License*
