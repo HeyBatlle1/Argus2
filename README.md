@@ -1,6 +1,18 @@
-# ARGUS
+<p align="center">
+  <img src="assets/logo.svg" alt="Argus — Ferris locked in the vault" width="220" />
+</p>
 
-**Secure Local AI Agent Runtime**
+<h1 align="center">ARGUS</h1>
+
+<p align="center">
+  <strong>Secure Agent Runtime. Built in Rust. Ferris stays locked in.</strong>
+</p>
+
+<p align="center">
+  <a href="./SOUL.md">Soul</a> · <a href="./docs/SETUP.md">Setup</a> · <a href="./docs/SUPABASE_SCHEMA.sql">Schema</a> · <a href="LICENSE">MIT</a>
+</p>
+
+---
 
 A production-grade AI agent built in Rust. Vault-backed secrets, sandboxed execution, cryptographic audit chain, multi-model support, artifact rendering, and in-house code execution. Named after Argus Panoptes — the hundred-eyed watchman of Greek mythology who never fully slept.
 
