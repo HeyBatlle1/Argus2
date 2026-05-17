@@ -39,8 +39,8 @@ First: thank you. Security is a team sport.
 
 ```bash
 # Clone
-git clone https://github.com/burtonstuff/argus
-cd argus
+git clone https://github.com/HeyBatlle1/Argus2
+cd Argus2
 
 # Build
 cargo build

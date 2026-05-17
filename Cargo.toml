@@ -12,9 +12,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["HeyBattle1"]
+authors = ["HeyBatlle1"]
 license = "MIT"
-repository = "https://github.com/HeyBattle1/argus"
+repository = "https://github.com/HeyBatlle1/Argus2"
 description = "Quantum-hardened, security-first AI agent runtime"
 readme = "README.md"
 keywords = ["ai", "agent", "security", "quantum", "llm"]
