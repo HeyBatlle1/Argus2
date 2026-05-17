@@ -87,7 +87,7 @@ docs(readme): add installation instructions
 
 Found a vulnerability? **Do not open a public issue.**
 
-Email security@[domain].com with:
+Open a [GitHub Security Advisory](https://github.com/HeyBatlle1/Argus2/security/advisories/new) — do not use public issues. Include:
 - Description of the vulnerability
 - Steps to reproduce
 - Potential impact

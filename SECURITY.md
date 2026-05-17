@@ -4,7 +4,7 @@
 
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
-Email: [AGSThoughtFactory@proton.me]
+Open a [GitHub Security Advisory](https://github.com/HeyBatlle1/Argus2/security/advisories/new) to report privately.
 
 We take security seriously. That's literally why this project exists.
 
