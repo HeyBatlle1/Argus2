@@ -4,7 +4,7 @@
 
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
-Email: [TBD - set up security email]
+Email: [AGSThoughtFactory@proton.me]
 
 We take security seriously. That's literally why this project exists.
 
