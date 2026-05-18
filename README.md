@@ -212,9 +212,9 @@ The hundred eyes see everything. They report what they see. They do not become w
 
 | Item | Priority |
 |------|----------|
-| Discord inbound — wire `run_agent_turn` into `discord.rs` | Medium |
-| `argus-memory/src/supabase.rs` SupabaseMemory instantiation | Low |
-| 34 `.unwrap()` calls in production paths | Low |
+| `cargo fmt` / `cargo clippy` workspace-wide clean pass | Low |
+| Linux Secret Service keychain testing | Low |
+| Windows Credential Manager testing | Low |
 
 ---
 

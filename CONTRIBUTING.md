@@ -29,8 +29,9 @@ cargo build
 
 ### Initialize the vault
 
+The vault is created automatically on first use. Just set your key:
+
 ```bash
-./target/debug/argus init
 ./target/debug/argus vault set openrouter_api_key YOUR_KEY
 ```
 
