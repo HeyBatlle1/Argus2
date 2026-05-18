@@ -142,11 +142,12 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Vault { action }) => {
-            handle_vault_command(vault.as_mut().unwrap(), action)?;
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            handle_vault_command(vault, action)?;
         }
 
         Some(Commands::Tui { api_key }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
             let config = load_agent_config(vault, api_key)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -156,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         None => {
-            let vault = vault.as_mut().unwrap();
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -166,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Telegram { token }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
             let bot_token = if let Some(t) = token {
                 t
             } else {
@@ -180,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Web { port }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -191,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Discord) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
             let mut config = load_agent_config(vault, None)?;
             let bot_token = vault.retrieve("discord_bot_token").ok()
                 .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok());
@@ -385,9 +386,15 @@ async fn main() -> anyhow::Result<()> {
                         tokio::spawn(async move {
                             loop {
                                 let now = chrono::Utc::now();
-                                let next_midnight = (now.date_naive() + chrono::Duration::days(1))
-                                    .and_hms_opt(0, 0, 0).unwrap()
-                                    .and_utc();
+                                let next_midnight = match (now.date_naive() + chrono::Duration::days(1))
+                                    .and_hms_opt(0, 0, 0) {
+                                    Some(t) => t.and_utc(),
+                                    None => {
+                                        eprintln!("[!] Audit anchor: could not compute next midnight, retrying in 1h");
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                                        continue;
+                                    }
+                                };
                                 let secs = (next_midnight - now).num_seconds().max(0) as u64;
                                 tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
 

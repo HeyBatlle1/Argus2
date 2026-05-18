@@ -202,7 +202,7 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
                 }
             }
         }
-    ]).as_array().unwrap().clone()
+    ]).as_array().cloned().unwrap_or_default()
 }
 
 pub async fn execute_builtin(
