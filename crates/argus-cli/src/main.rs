@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use argus_crypto::{SecureVault, vault::VaultError};
 use argus_core::AgentConfig;
-use chrono;
 
 const LOGO: &str = r#"
     ___    ____  ______  __  _______
@@ -97,6 +96,15 @@ fn load_agent_config(vault: &SecureVault, cli_api_key: Option<String>) -> anyhow
     Ok(config)
 }
 
+fn require_vault<'a>(
+    vault: &'a mut Option<SecureVault>,
+    context: &str,
+) -> anyhow::Result<&'a mut SecureVault> {
+    vault
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("Secure vault unavailable while {}", context))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Structured logging — level controlled by RUST_LOG env var.
@@ -142,11 +150,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Vault { action }) => {
-            handle_vault_command(vault.as_mut().unwrap(), action)?;
+            handle_vault_command(require_vault(&mut vault, "running vault command")?, action)?;
         }
 
         Some(Commands::Tui { api_key }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = require_vault(&mut vault, "starting TUI")?;
             let config = load_agent_config(vault, api_key)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -156,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         None => {
-            let vault = vault.as_mut().unwrap();
+            let vault = require_vault(&mut vault, "starting TUI")?;
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -166,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Telegram { token }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = require_vault(&mut vault, "starting Telegram bot")?;
             let bot_token = if let Some(t) = token {
                 t
             } else {
@@ -180,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Web { port }) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = require_vault(&mut vault, "starting web server")?;
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -191,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Discord) => {
-            let vault = vault.as_mut().unwrap();
+            let vault = require_vault(&mut vault, "starting Discord bot")?;
             let mut config = load_agent_config(vault, None)?;
             let bot_token = vault.retrieve("discord_bot_token").ok()
                 .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok());
@@ -385,9 +393,14 @@ async fn main() -> anyhow::Result<()> {
                         tokio::spawn(async move {
                             loop {
                                 let now = chrono::Utc::now();
-                                let next_midnight = (now.date_naive() + chrono::Duration::days(1))
-                                    .and_hms_opt(0, 0, 0).unwrap()
-                                    .and_utc();
+                                let Some(next_midnight) =
+                                    (now.date_naive() + chrono::Duration::days(1)).and_hms_opt(0, 0, 0)
+                                else {
+                                    eprintln!("[!] Could not schedule daily audit anchor at UTC midnight");
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                                    continue;
+                                };
+                                let next_midnight = next_midnight.and_utc();
                                 let secs = (next_midnight - now).num_seconds().max(0) as u64;
                                 tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
 

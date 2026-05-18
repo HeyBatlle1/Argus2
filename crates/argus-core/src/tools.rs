@@ -10,7 +10,7 @@ const MAX_DIR_ENTRIES: usize = 200;
 const MAX_SEARCH_RESULTS: usize = 6;
 
 pub fn builtin_tool_schemas() -> Vec<Value> {
-    serde_json::json!([
+    let Value::Array(schemas) = serde_json::json!([
         {
             "type": "function",
             "function": {
@@ -202,7 +202,11 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
                 }
             }
         }
-    ]).as_array().unwrap().clone()
+    ]) else {
+        return Vec::new();
+    };
+
+    schemas
 }
 
 pub async fn execute_builtin(
