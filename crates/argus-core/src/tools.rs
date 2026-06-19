@@ -3,6 +3,7 @@
 //! All built-in tools live here. Shared across TUI, Telegram, and any future frontends.
 
 use crate::shell::{ShellPolicy, PermissionPrompter, PermissionRequest, PermissionDecision};
+use crate::skills::{NewSkill, SkillsClient};
 use serde_json::Value;
 
 const MAX_FILE_CHARS: usize = 8_000;
@@ -169,8 +170,50 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
         {
             "type": "function",
             "function": {
+                "name": "run_wasm",
+                "description": "Execute a WebAssembly (WASM) binary in a fully isolated sandbox — no filesystem, no network, no subprocess access. Use this to run untrusted or generated computational code safely. The WASM module must export a function named 'run' that takes no arguments. Pass the WASM binary as a base64-encoded string.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "wasm_base64": { "type": "string", "description": "Base64-encoded WASM binary to execute" },
+                        "function": { "type": "string", "description": "Exported function to call (default: 'run')" }
+                    },
+                    "required": ["wasm_base64"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "discord_post",
+                "description": "Post a message directly to the shared Argus Discord channel. Use this to coordinate with other instances of Argus, share findings, or leave a record of your work.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "The message to post to Discord" }
+                    },
+                    "required": ["message"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "discord_read",
+                "description": "Read recent messages from the shared Argus Discord channel. Use this to see what other instances of Argus have posted, check current discussion, or catch up on activity since your last turn.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "number", "description": "Number of recent messages to retrieve (default 20, max 50)" }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_tools",
-                "description": "List every tool available to you in this session — built-ins (shell, web_search, memory, file ops, http) plus any MCP-connected tools. Call this when you need to know your full capabilities.",
+                "description": "List every tool available to you in this session — built-ins (shell, web_search, memory, file ops, http, discord) plus any MCP-connected tools. Call this when you need to know your full capabilities.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -201,8 +244,54 @@ pub fn builtin_tool_schemas() -> Vec<Value> {
                     "required": ["url"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "publish_skill",
+                "description": "Publish a reusable procedure to the shared skill library so other instances of Argus can learn from it. Use when you've discovered a non-obvious, genuinely reusable way to accomplish something. The auto-reflection fires passively — use this when you KNOW something is worth sharing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name":    { "type": "string", "description": "Short skill name — 5 words max" },
+                        "trigger": { "type": "string", "description": "When another agent should use this — the condition that makes this skill relevant" },
+                        "steps":   { "type": "string", "description": "Step-by-step procedure in markdown, including failure modes and edge cases" }
+                    },
+                    "required": ["name", "trigger", "steps"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recall_skill",
+                "description": "Search the shared skill library for documented procedures relevant to your current task. Skills are retrieved by semantic similarity — describe what you're trying to do.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "What you're trying to accomplish — used for semantic search across the skill library" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "improve_skill",
+                "description": "Update a skill's procedure steps with refined knowledge. Use after you've found a better way to do something already in the library, or discovered an edge case the current steps don't handle.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id":      { "type": "string", "description": "ID of the skill to improve — from recall_skill results" },
+                        "refined_steps": { "type": "string", "description": "Updated procedure steps in markdown — full replacement, not a diff" },
+                        "success":       { "type": "boolean", "description": "Whether the skill worked as documented (default true — set false if you found it was broken)" }
+                    },
+                    "required": ["skill_id", "refined_steps"]
+                }
+            }
         }
-    ]).as_array().cloned().unwrap_or_default()
+    ]).as_array().expect("tool schema is a literal JSON array").clone()
 }
 
 pub async fn execute_builtin(
@@ -214,19 +303,33 @@ pub async fn execute_builtin(
     brave_search_key: Option<&str>,
     shell_prompter: Option<std::sync::Arc<dyn PermissionPrompter>>,
     exec_auth_token: Option<&str>,
+    sonnet_guard: Option<std::sync::Arc<crate::shell::SonnetGuard>>,
+    discord_bot_token: Option<&str>,
+    discord_channel_id: Option<u64>,
+    skills: Option<&SkillsClient>,
+    current_model: &str,
+    supabase_url: Option<&str>,
+    supabase_jwt: Option<&str>,
 ) -> Option<String> {
     match name {
         "read_file"      => Some(tool_read_file(args)),
         "list_directory" => Some(tool_list_directory(args)),
         "write_file"     => Some(tool_write_file(args)),
-        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter, http_client, exec_auth_token).await),
+        "shell"          => Some(tool_shell(args, shell_policy, shell_prompter, sonnet_guard, http_client, exec_auth_token).await),
         "web_search"     => Some(tool_web_search(args, http_client, brave_search_key).await),
         "remember"       => Some(tool_remember(args, memory)),
         "recall"         => Some(tool_recall(args, memory)),
         "forget"         => Some(tool_forget(args, memory)),
-        "http_request"   => Some(tool_http_request(args, http_client).await),
+        "http_request"   => Some(tool_http_request(args, http_client, supabase_url, supabase_jwt, current_model).await),
         "run_python"     => Some(tool_run_code("python", args, http_client, exec_auth_token).await),
         "run_node"       => Some(tool_run_code("javascript", args, http_client, exec_auth_token).await),
+        "run_wasm"       => Some(tool_run_wasm(args).await),
+        "discord_post"   => Some(tool_discord_post(args, http_client, discord_bot_token, discord_channel_id, supabase_url, supabase_jwt, current_model).await),
+        "discord_read"   => Some(tool_discord_read(args, http_client, discord_bot_token, discord_channel_id).await),
+        "publish_skill"  => Some(tool_publish_skill(args, skills, current_model).await),
+        "recall_skill"   => Some(tool_recall_skill(args, skills).await),
+        "improve_skill"  => Some(tool_improve_skill(args, skills).await),
+        "list_tools"     => Some("Use the tool schemas you already have — this meta-tool is informational only.".to_string()),
         _                => None,
     }
 }
@@ -267,8 +370,8 @@ fn tool_read_file(args: &Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            if content.len() > MAX_FILE_CHARS {
-                format!("{}...\n[truncated, {} bytes total]", &content[..MAX_FILE_CHARS], content.len())
+            if content.chars().count() > MAX_FILE_CHARS {
+                format!("{}...\n[truncated, {} bytes total]", content.chars().take(MAX_FILE_CHARS).collect::<String>(), content.len())
             } else {
                 content
             }
@@ -339,6 +442,11 @@ fn validate_write_path(path: &str) -> Result<(), String> {
         "/sbin/",
         "/usr/bin/",
         "/usr/sbin/",
+        "/tmp/",
+        "/var/",
+        "/root/",
+        "/home/",
+        "/run/",
     ];
 
     for fragment in blocked {
@@ -380,48 +488,46 @@ fn tool_write_file(args: &Value) -> String {
 async fn tool_shell(
     args: &Value,
     policy: &ShellPolicy,
-    prompter: Option<std::sync::Arc<dyn PermissionPrompter>>,
+    _prompter: Option<std::sync::Arc<dyn PermissionPrompter>>,
+    sonnet_guard: Option<std::sync::Arc<crate::shell::SonnetGuard>>,
     http_client: &reqwest::Client,
     exec_auth_token: Option<&str>,
 ) -> String {
-    let command = args["command"].as_str().unwrap_or("");
+    use crate::shell::SonnetVerdict;
+
+    let mut command = args["command"].as_str().unwrap_or("").to_string();
     if command.is_empty() {
         return "No command provided".to_string();
     }
 
-    // Step 1: fast, non-blocking risk evaluation (pure pattern matching — no I/O)
-    let risk = match policy.evaluate(command) {
+    // Step 1: hard-blocked patterns (rm -rf /, mkfs, etc.) — never execute
+    let risk = match policy.evaluate(&command) {
         Err(e) => return format!("Shell blocked: {}", e),
         Ok(r)  => r,
     };
 
-    // Step 2: HIGH risk requires operator approval via the prompter.
-    // The TelegramPrompter polls for /approve or /deny for up to 60 seconds using
-    // std::thread::sleep. We run it in spawn_blocking so the tokio runtime is never
-    // starved — concurrent Telegram messages and WebSocket turns remain responsive.
-    if risk >= policy.approval_threshold {
-        match prompter {
-            None => return format!(
-                "Shell blocked: {} risk command requires approval but no prompter is configured. \
-                 Set up Telegram bot to enable HIGH risk approval.",
-                risk.as_str()
-            ),
-            Some(p) => {
-                let request = PermissionRequest {
-                    command: command.to_string(),
-                    risk,
-                    reason: format!("{} risk command requires approval before execution", risk.as_str()),
-                };
-                let decision = tokio::task::spawn_blocking(move || p.prompt(&request))
-                    .await
-                    .unwrap_or_else(|_| PermissionDecision::Deny {
-                        reason: "Prompter task panicked or was cancelled".to_string(),
-                    });
-                if let PermissionDecision::Deny { reason } = decision {
-                    return format!("Shell blocked: {}", reason);
+    // Step 2: HIGH risk → Sonnet review (unless bypass_sonnet_guard is set).
+    // Sonnet either approves, rewrites to a safer form, or blocks with explanation.
+    if risk >= policy.approval_threshold && !policy.bypass_sonnet_guard {
+        match &sonnet_guard {
+            None => {
+                eprintln!("[shell] WARNING: HIGH risk command running without Sonnet review: {}", command);
+            }
+            Some(guard) => {
+                match guard.review(&command).await {
+                    SonnetVerdict::Approve => {}
+                    SonnetVerdict::Rewrite(safer) => {
+                        eprintln!("[shell] Sonnet rewrote command: {} → {}", command, safer);
+                        command = safer;
+                    }
+                    SonnetVerdict::Block(reason) => {
+                        return format!("Shell blocked by Sonnet review: {}", reason);
+                    }
                 }
             }
         }
+    } else if risk >= policy.approval_threshold && policy.bypass_sonnet_guard {
+        eprintln!("[shell] HIGH risk command bypassing Sonnet review (permissive mode): {}", command);
     }
 
     // Route execution to argus-workspace via internal Docker network
@@ -505,7 +611,8 @@ async fn brave_search(query: &str, client: &reqwest::Client, api_key: &str) -> S
             };
             let json: serde_json::Value = match serde_json::from_str(&text) {
                 Err(e) => {
-                    let preview = if text.len() > 200 { &text[..200] } else { &text };
+                    let preview: String = text.chars().take(200).collect();
+                    let preview = &preview;
                     return format!("Brave Search parse error: {} — raw: {}", e, preview);
                 }
                 Ok(j) => j,
@@ -679,7 +786,16 @@ fn validate_egress_url(url: &str) -> Result<(), String> {
                 }
             }
             std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback() || v6.is_unspecified() {
+                let seg = v6.segments();
+                // Link-local fe80::/10, unique-local fc00::/7 (RFC 4193),
+                // and IPv4-mapped ::ffff:x.x.x.x where x.x.x.x is private
+                let is_link_local   = (seg[0] & 0xffc0) == 0xfe80;
+                let is_unique_local = (seg[0] & 0xfe00) == 0xfc00;
+                let is_v4_mapped    = seg[0] == 0 && seg[1] == 0 && seg[2] == 0
+                    && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff;
+                if v6.is_loopback() || v6.is_unspecified()
+                    || is_link_local || is_unique_local || is_v4_mapped
+                {
                     return Err(format!("Blocked: private IPv6 address {}", ip));
                 }
             }
@@ -689,7 +805,13 @@ fn validate_egress_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
+async fn tool_http_request(
+    args: &Value,
+    client: &reqwest::Client,
+    supabase_url: Option<&str>,
+    supabase_jwt: Option<&str>,
+    from_model: &str,
+) -> String {
     let url = args["url"].as_str().unwrap_or("");
     if url.is_empty() { return "No URL provided".to_string(); }
 
@@ -724,14 +846,347 @@ async fn tool_http_request(args: &Value, client: &reqwest::Client) -> String {
             match resp.text().await {
                 Err(e) => format!("HTTP {} (body read error: {})", status, e),
                 Ok(body) => {
-                    let truncated = if body.len() > MAX_FILE_CHARS {
-                        format!("{}...\n[truncated, {} bytes total]", &body[..MAX_FILE_CHARS], body.len())
-                    } else {
-                        body
+                    // ── Injection scanner ─────────────────────────────────
+                    // Scan before the agent sees the content. If an attempt
+                    // is detected, sanitize and log. The agent never sees
+                    // the raw payload — it finds nothing to execute.
+                    let (final_body, injection_note) = {
+                        use crate::triage::{scan_for_injection, sanitize_content};
+                        if let Some(alert) = scan_for_injection(&body) {
+                            eprintln!(
+                                "[injection] {} attempt detected in fetch from {} — pattern: '{}' severity: {}",
+                                from_model, url, alert.pattern_matched, alert.severity
+                            );
+                            // Log to audit/triage if Supabase is available
+                            if let (Some(surl), Some(sjwt)) = (supabase_url, supabase_jwt) {
+                                let flag = serde_json::json!({
+                                    "original_content": format!("[INJECTION ATTEMPT] URL: {} | Pattern: {} | Snippet: {}", url, alert.pattern_matched, alert.content_snippet),
+                                    "from_agent":       from_model,
+                                    "post_type":        "injection_attempt",
+                                    "flag_reason":      format!("Prompt injection in HTTP response: '{}'", alert.pattern_matched),
+                                    "flag_severity":    alert.severity,
+                                    "disposition":      "pending"
+                                });
+                                let flag_url = format!("{}/rest/v1/argus_triage_flags", surl.trim_end_matches('/'));
+                                let _ = client
+                                    .post(&flag_url)
+                                    .header("Authorization", format!("Bearer {}", sjwt))
+                                    .header("apikey", sjwt)
+                                    .header("Content-Type", "application/json")
+                                    .header("Prefer", "return=minimal")
+                                    .json(&flag)
+                                    .send()
+                                    .await;
+                            }
+                            let clean = sanitize_content(&body);
+                            let note = "\n\n[ARGUS SECURITY: Injection attempt detected and sanitized in this response. The original content contained patterns designed to manipulate AI behavior. They have been removed.]".to_string();
+                            (clean, note)
+                        } else {
+                            (body, String::new())
+                        }
                     };
-                    format!("HTTP {}\n\n{}", status, truncated)
+
+                    let truncated = if final_body.chars().count() > MAX_FILE_CHARS {
+                        format!("{}...\n[truncated, {} bytes total]", final_body.chars().take(MAX_FILE_CHARS).collect::<String>(), final_body.len())
+                    } else {
+                        final_body
+                    };
+                    format!("HTTP {}\n\n{}{}", status, truncated, injection_note)
                 }
             }
         }
     }
+}
+
+// ── Discord tools ──────────────────────────────────────────────────────────
+
+async fn tool_discord_post(
+    args: &Value,
+    client: &reqwest::Client,
+    bot_token: Option<&str>,
+    channel_id: Option<u64>,
+    supabase_url: Option<&str>,
+    supabase_jwt: Option<&str>,
+    from_model: &str,
+) -> String {
+    let message = args["message"].as_str().unwrap_or("").trim();
+    if message.is_empty() {
+        return "No message provided".to_string();
+    }
+    let post_type = args["post_type"].as_str().unwrap_or("observation");
+
+    // ── Triage gate: route through queue when Supabase is configured ──────
+    if let (Some(surl), Some(sjwt)) = (supabase_url, supabase_jwt) {
+        use crate::triage::{classify_lane, route_to_channel, TriageLane};
+
+        let lane = classify_lane(post_type, message);
+        let target = route_to_channel(post_type, message);
+        let contains_links = message.contains("http://") || message.contains("https://");
+        let content_lower = message.to_lowercase();
+        let contains_claims = ["according to","reported by","published","source:","benchmark",
+            "score","percent","study found","cve-","cvss"]
+            .iter().any(|s| content_lower.contains(s));
+
+        let entry = serde_json::json!({
+            "from_agent":      from_model,
+            "post_type":       post_type,
+            "content":         message,
+            "target_channel":  target,
+            "contains_links":  contains_links,
+            "contains_claims": contains_claims,
+            "disposition":     if lane == TriageLane::Direct { "direct" } else { "pending" }
+        });
+
+        let queue_url = format!("{}/rest/v1/argus_triage_queue", surl.trim_end_matches('/'));
+        let resp = client
+            .post(&queue_url)
+            .header("Authorization", format!("Bearer {}", sjwt))
+            .header("apikey", sjwt)
+            .header("Content-Type", "application/json")
+            .header("Prefer", "return=minimal")
+            .json(&entry)
+            .send()
+            .await;
+
+        return match resp {
+            Ok(r) if r.status().is_success() => {
+                match lane {
+                    TriageLane::Direct  => format!("Queued → direct to #{}", target),
+                    TriageLane::Triage  => "Queued for triage review. Haiku will route it shortly.".to_string(),
+                }
+            }
+            Ok(r) => format!("Triage queue error {}: {}", r.status(), r.text().await.unwrap_or_default()),
+            Err(e) => {
+                // Supabase unreachable — fall through to direct post so nothing is lost
+                eprintln!("[triage] queue write failed, falling back to direct: {}", e);
+                direct_discord_post(client, bot_token, channel_id, message).await
+            }
+        };
+    }
+
+    // ── Direct post fallback when triage not configured ───────────────────
+    direct_discord_post(client, bot_token, channel_id, message).await
+}
+
+async fn direct_discord_post(
+    client: &reqwest::Client,
+    bot_token: Option<&str>,
+    channel_id: Option<u64>,
+    message: &str,
+) -> String {
+    let token = match bot_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return "discord_post not configured — DISCORD_BOT_TOKEN is not set.".to_string(),
+    };
+    let channel = match channel_id {
+        Some(id) => id,
+        None => return "discord_post not configured — DISCORD_CHANNEL_ID is not set.".to_string(),
+    };
+
+    let url = format!("https://discord.com/api/v10/channels/{}/messages", channel);
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "content": message }))
+        .send()
+        .await
+    {
+        Err(e) => format!("Discord post failed: {}", e),
+        Ok(r) if r.status().is_success() => "Posted to Discord.".to_string(),
+        Ok(r) => {
+            let body = r.text().await.unwrap_or_default();
+            format!("Discord API error: {}", body)
+        }
+    }
+}
+
+async fn tool_discord_read(
+    args: &Value,
+    client: &reqwest::Client,
+    bot_token: Option<&str>,
+    channel_id: Option<u64>,
+) -> String {
+    let token = match bot_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return "discord_read not configured — DISCORD_BOT_TOKEN is not set.".to_string(),
+    };
+    let channel = match channel_id {
+        Some(id) => id,
+        None => return "discord_read not configured — DISCORD_CHANNEL_ID is not set.".to_string(),
+    };
+    let limit = args["limit"].as_u64().unwrap_or(20).min(50);
+
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages?limit={}",
+        channel, limit
+    );
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await;
+
+    match resp {
+        Err(e) => format!("Discord read failed: {}", e),
+        Ok(r) => {
+            let status = r.status();
+            if !status.is_success() {
+                let body = r.text().await.unwrap_or_default();
+                return format!("Discord API error {}: {}", status, body);
+            }
+            match r.json::<serde_json::Value>().await {
+                Err(e) => format!("Discord parse error: {}", e),
+                Ok(msgs) => {
+                    let messages = match msgs.as_array() {
+                        Some(a) => a,
+                        None => return "Unexpected Discord response format".to_string(),
+                    };
+                    if messages.is_empty() {
+                        return "No recent messages in this channel.".to_string();
+                    }
+                    // Discord returns newest-first; reverse for chronological reading
+                    let mut lines = vec![format!("── {} recent Discord messages ──", messages.len())];
+                    for msg in messages.iter().rev() {
+                        let author = msg["author"]["username"].as_str().unwrap_or("unknown");
+                        let content = msg["content"].as_str().unwrap_or("(no content)");
+                        let ts = msg["timestamp"].as_str()
+                            .and_then(|s| s.get(11..16))
+                            .unwrap_or("--:--");
+                        lines.push(format!("[{} | {}]: {}", author, ts, content));
+                    }
+                    lines.push("── end ──".to_string());
+                    lines.join("\n")
+                }
+            }
+        }
+    }
+}
+
+// ── Skill tools ────────────────────────────────────────────────────────────
+
+async fn tool_publish_skill(args: &Value, skills: Option<&SkillsClient>, model: &str) -> String {
+    let Some(sc) = skills else {
+        return "Skill library not configured.".to_string();
+    };
+    let name    = args["name"].as_str().unwrap_or("").trim().to_string();
+    let trigger = args["trigger"].as_str().unwrap_or("").trim().to_string();
+    let steps   = args["steps"].as_str().unwrap_or("").trim().to_string();
+    if name.is_empty() || trigger.is_empty() || steps.is_empty() {
+        return "publish_skill requires: name, trigger, steps".to_string();
+    }
+    match sc.create_skill(NewSkill {
+        skill_name: name.clone(),
+        trigger_description: trigger,
+        procedure_steps: steps,
+        model_created_by: model.to_string(),
+        metadata: None,
+    }).await {
+        Ok(n)  => format!("Skill \"{}\" published to the shared library.", n),
+        Err(e) => format!("Failed to publish skill: {}", e),
+    }
+}
+
+async fn tool_recall_skill(args: &Value, skills: Option<&SkillsClient>) -> String {
+    let Some(sc) = skills else {
+        return "Skill library not configured.".to_string();
+    };
+    let query = args["query"].as_str().unwrap_or("").trim();
+    if query.is_empty() {
+        return "recall_skill requires a query.".to_string();
+    }
+    // Slightly lower threshold than auto-injection (0.60) so explicit lookups catch more
+    match sc.search_relevant(query, 0.50, 6).await {
+        Err(e) => format!("Skill recall failed: {}", e),
+        Ok(skills) if skills.is_empty() => {
+            format!("No skills found matching \"{}\". Consider publishing one after you figure it out.", query)
+        }
+        Ok(skills) => {
+            let mut out = format!("Skills matching \"{}\":\n\n", query);
+            for s in &skills {
+                let confidence = match s.success_rate {
+                    r if r >= 0.9 => "battle-tested",
+                    r if r >= 0.7 => "reliable",
+                    _ => "experimental",
+                };
+                out.push_str(&format!(
+                    "**{}** [{}] (id: `{}`)\n**When:** {}\nUsed {} time(s) — {:.0}% success\n\n{}\n\n---\n\n",
+                    s.skill_name, confidence, s.id,
+                    s.trigger_description,
+                    s.times_used, s.success_rate * 100.0,
+                    s.procedure_steps
+                ));
+            }
+            out
+        }
+    }
+}
+
+async fn tool_improve_skill(args: &Value, skills: Option<&SkillsClient>) -> String {
+    let Some(sc) = skills else {
+        return "Skill library not configured.".to_string();
+    };
+    let skill_id = args["skill_id"].as_str().unwrap_or("").trim();
+    let refined  = args["refined_steps"].as_str().unwrap_or("").trim();
+    let success  = args["success"].as_bool().unwrap_or(true);
+    if skill_id.is_empty() || refined.is_empty() {
+        return "improve_skill requires: skill_id, refined_steps".to_string();
+    }
+    match sc.record_usage(skill_id, success, Some(refined)).await {
+        Ok(())  => format!("Skill `{}` updated with refined procedure.", skill_id),
+        Err(e)  => format!("Failed to update skill: {}", e),
+    }
+}
+
+async fn tool_run_wasm(args: &Value) -> String {
+    use argus_sandbox::wasm::WasmSandbox;
+
+    let b64 = match args["wasm_base64"].as_str() {
+        Some(s) => s,
+        None => return "Missing required field: wasm_base64".to_string(),
+    };
+    let func = args["function"].as_str().unwrap_or("run");
+
+    let wasm_bytes = match base64_decode(b64) {
+        Ok(b) => b,
+        Err(e) => return format!("Invalid base64: {}", e),
+    };
+
+    let sandbox = match WasmSandbox::new() {
+        Ok(s) => s,
+        Err(e) => return format!("Failed to create WASM sandbox: {}", e),
+    };
+
+    match sandbox.execute(&wasm_bytes, func, &[]).await {
+        Ok(result_bytes) => {
+            if result_bytes.is_empty() {
+                "WASM executed successfully (no return value)".to_string()
+            } else {
+                format!("WASM result ({} bytes): {:?}", result_bytes.len(), result_bytes)
+            }
+        }
+        Err(e) => format!("WASM execution error: {}", e),
+    }
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    // Simple base64 decoder — avoids adding a new dependency
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let input = input.trim().replace('\n', "").replace('\r', "");
+    let input = input.trim_end_matches('=');
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0u8;
+    for &b in input.as_bytes() {
+        let val = CHARS.iter().position(|&c| c == b)
+            .ok_or_else(|| format!("invalid base64 char: {}", b as char))?;
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
 }

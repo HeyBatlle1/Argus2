@@ -63,7 +63,7 @@ impl ArgusBot {
             "/model" => {
                 if parts.len() == 1 {
                     Some(format!(
-                        "Current model: {} ({})\n\nAvailable:\n  haiku  — {}\n  sonnet — {}\n  opus   — {}\n  grok   — {}\n  gemini — {}\n\nSwitch with /model <name>",
+                        "Current model: {} ({})\n\nAvailable:\n  haiku    — {}\n  sonnet   — {}\n  opus     — {}\n  nemotron — {}\n  gemini   — {}\n\nSwitch with /model <name>",
                         model_label(&self.config.model), self.config.model,
                         MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK, MODEL_GEMINI
                     ))
@@ -88,9 +88,17 @@ impl ArgusBot {
         let mut response_text = String::new();
         let mut tool_log = Vec::new();
 
+        let surface_prefix = if history.is_empty() {
+            "[SURFACE: Telegram — direct line to the person who built this. \
+            This is a private conversation.]\n\n".to_string()
+        } else {
+            String::new()
+        };
+        let prefixed_msg = format!("{}{}", surface_prefix, user_msg);
+
         let result = argus_core::run_agent_turn(
             &self.config,
-            user_msg,
+            &prefixed_msg,
             &history,
             &self.shell_policy,
             &self.memory,
@@ -98,7 +106,7 @@ impl ArgusBot {
             &self.client,
             |event| match event {
                 AgentEvent::ToolCall { name, preview, .. } => {
-                    let short = if preview.len() > 80 { format!("{}...", &preview[..80]) } else { preview };
+                    let short = if preview.chars().count() > 80 { format!("{}...", preview.chars().take(80).collect::<String>()) } else { preview };
                     tool_log.push(format!("[tool] {}: {}", name, short));
                 }
                 AgentEvent::Response(text) => { response_text = text; }
@@ -133,7 +141,7 @@ impl ArgusBot {
                 tokio::spawn(async move {
                     // Truncate to a reasonable intranet post length
                     let content = if summary.len() > 500 {
-                        format!("{}...", &summary[..497])
+                        format!("{}...", summary.chars().take(497).collect::<String>())
                     } else {
                         summary
                     };
@@ -240,6 +248,8 @@ pub async fn run_telegram_bot(token: String, config: AgentConfig) {
         return;
     }
     let bot = Bot::new(token);
+    // Clear any stale webhook so the long-poll dispatcher doesn't time out on GetWebhookInfo.
+    let _ = bot.delete_webhook().await;
     let argus = Arc::new(Mutex::new(ArgusBot::new(config)));
 
     teloxide::repl(bot, move |bot: Bot, msg: Message| {

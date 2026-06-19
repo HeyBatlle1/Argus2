@@ -16,3 +16,4 @@ dirs = "5.0"
 chrono = { version = "0.4", features = ["clock"] }
 uuid = { workspace = true }
 argus-audit = { path = "../argus-audit" }
+argus-sandbox = { path = "../argus-sandbox" }

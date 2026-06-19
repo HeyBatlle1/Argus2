@@ -1,129 +1,104 @@
 # Contributing to Argus
 
-Thanks for your interest. Argus is a security-focused project — contributions are welcome but the security model is non-negotiable. Read this before opening a PR.
+First: thank you. Security is a team sport.
 
----
+## Ground Rules
 
-## The One Rule
+### Security First
+- Every PR gets a security review
+- No plaintext secrets, ever
+- If you're unsure whether something is secure, ask
 
-The security architecture is the project. If a contribution weakens the vault, the audit chain, the workspace isolation, or the shell risk classifier — it won't be merged regardless of how useful the feature is. Security first, features second.
-
----
-
-## Development Setup
-
-### Prerequisites
-
-- Rust toolchain: [rustup.rs](https://rustup.rs)
-- Docker and Docker Compose
-- A Supabase account (free tier works for development)
-- An OpenRouter API key ([openrouter.ai](https://openrouter.ai))
-
-### Clone and build
-
-```bash
-git clone https://github.com/HeyBatlle1/Argus2.git
-cd Argus2
-cargo build
-```
-
-### Initialize the vault
-
-The vault is created automatically on first use. Just set your key:
-
-```bash
-./target/debug/argus vault set openrouter_api_key YOUR_KEY
-```
-
-### Run tests
-
-```bash
-cargo test
-```
-
-All tests must pass before submitting a PR.
-
-### Launch the stack
-
-```bash
-./argus-up.sh
-```
-
-This reads from the vault, injects secrets into Docker, and starts all three containers. Never use `docker compose up` directly — it bypasses vault injection and the daemon will crash-loop with empty credentials.
-
----
-
-## Crate Structure
-
-```
-argus-crypto    Secrets vault — touch with caution
-argus-core      Agent loop, tools, shell policy — most feature work happens here
-argus-memory    SQLite + Supabase pgvector — memory and skill system
-argus-audit     Cryptographic audit chain — do not break chain integrity
-argus-sandbox   WASM isolation via wasmtime
-argus-cli       Telegram bot, WebSocket server, daemon entrypoint
-```
-
----
-
-## Good First Issues
-
-Look for issues tagged [`good first issue`](https://github.com/HeyBatlle1/Argus2/labels/good%20first%20issue). These are scoped, well-defined, and won't require deep knowledge of the full architecture.
-
-The `.unwrap()` cleanup issue is the best starting point for Rust developers who want to understand how the codebase is structured.
-
----
-
-## Commit Convention
-
-Use imperative mood, present tense:
-
-```
-feat: add Ollama provider for local model support
-fix: replace unwrap() in tools.rs network error path
-docs: update SETUP.md with Linux keychain instructions
-refactor: collapse three audit chain mutexes into ChainState
-```
-
-Prefix options: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
-
----
-
-## Pull Request Process
-
-1. Fork the repo and create a branch from `main`
-2. Make your changes
-3. Run `cargo test` — all tests must pass
-4. Run `cargo clippy` — no new warnings
-5. Update documentation if your change affects behavior
-6. Open a PR with a clear description of what changed and why
-
-Small, focused PRs are preferred over large ones. One thing at a time.
-
----
-
-## Security Issues
-
-Do not open public GitHub issues for security vulnerabilities. If you find a genuine security problem — especially anything related to vault security, sandbox escape, or audit chain integrity — contact HayHunt Solutions directly before disclosing publicly.
-
----
+### Code Quality
+- All code must pass `cargo clippy` with no warnings
+- All code must be formatted with `cargo fmt`
+- New features need tests
+- Public APIs need documentation
 
 ## What We're Looking For
 
-- Safe error propagation (replacing `.unwrap()` calls)
-- Provider support (Ollama, local models)
-- Platform support (Linux keychain fallback, Windows testing)
+### High Priority
+- Post-quantum crypto implementation (ML-KEM, ML-DSA)
+- WebAssembly sandbox hardening
+- Prompt injection detection
+- Audit logging
+
+### Medium Priority
+- Additional LLM provider support
+- TUI improvements
+- Performance optimization
+- Documentation
+
+### Always Welcome
+- Security vulnerability reports (see SECURITY.md)
+- Bug fixes
+- Test coverage improvements
 - Documentation improvements
-- Test coverage
 
-## What We're Not Looking For Right Now
+## Development Setup
 
-- Breaking changes to the vault format
-- Alternative secret storage backends that reduce security
-- Features that bypass the shell risk classifier
-- Unaudited dependencies
+```bash
+# Clone
+git clone https://github.com/burtonstuff/argus
+cd argus
+
+# Build
+cargo build
+
+# Test
+cargo test
+
+# Lint
+cargo clippy -- -D warnings
+
+# Format
+cargo fmt
+
+# Build release
+cargo build --release
+```
+
+## Pull Request Process
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/amazing-thing`)
+3. Make your changes
+4. Run `cargo test && cargo clippy && cargo fmt`
+5. Commit with a clear message
+6. Push and open a PR
+7. Wait for review (we're thorough, not slow)
+
+## Commit Messages
+
+```
+type(scope): description
+
+- type: feat, fix, docs, style, refactor, test, chore
+- scope: crypto, sandbox, memory, core, cli
+- description: imperative mood, lowercase, no period
+
+Examples:
+feat(crypto): implement ML-KEM key encapsulation
+fix(sandbox): prevent wasm memory escape via bounds check
+docs(readme): add installation instructions
+```
+
+## Security Vulnerabilities
+
+Found a vulnerability? **Do not open a public issue.**
+
+Email security@[domain].com with:
+- Description of the vulnerability
+- Steps to reproduce
+- Potential impact
+- Suggested fix (if you have one)
+
+We'll acknowledge within 24 hours and work with you on a fix.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the MIT License.
 
 ---
 
-*Argus — Built in Rust. Ferris stays locked in.*
-*HayHunt Solutions, 2026*
+*"In a world of one-click RCEs, be the hundred eyes."*

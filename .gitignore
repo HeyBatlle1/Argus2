@@ -24,5 +24,7 @@ Thumbs.db
 *.key
 secrets/
 
-# Build artifacts
-*.log
+# Build artifacts (but NOT audit logs — those are operational records)
+build/
+dist/
+*.tmp.log

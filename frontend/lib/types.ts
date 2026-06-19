@@ -1,5 +1,5 @@
 export type EyeState = 'watching' | 'thinking' | 'executing' | 'complete';
-export type ModelId = 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | 'grok' | 'grok-fast' | 'grok-multi' | 'gemini-flash';
+export type ModelId = 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | 'grok' | 'grok-build' | 'grok-multi' | 'gemini-flash';
 export type AccessTier = 'royal' | 'allied' | 'guest';
 export type ToolName =
   | 'read_file'
@@ -108,17 +108,64 @@ export interface VaultStatus {
   keys: string[];
 }
 
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  toolsUsed: string[];
+  useCount: number;
+  learnedAt: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  kind: 'tool' | 'memory' | 'discord' | 'audit';
+  label: string;
+  detail?: string;
+  ts: string;
+}
+
 export interface McpServer {
   name: string;
   connected: boolean;
   toolCount: number;
 }
 
+export interface Conversation {
+  id: string;
+  title: string;
+  surface: string;
+  model: string | null;
+  messageCount: number;
+  startedAt: string;
+  lastActiveAt: string;
+}
+
+export interface HistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  model?: string;
+}
+
 // WebSocket protocol
+export interface ScheduledTask {
+  id: string;
+  agent: ModelId;
+  runAt: string | null;  // ISO string or null = run immediately
+  description: string;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  createdAt: string;
+}
+
 export type ClientMessage =
   | { type: 'user_message'; content: string }
   | { type: 'switch_model'; model: ModelId }
-  | { type: 'cancel' };
+  | { type: 'set_model_tools'; model: string; enabled: boolean }
+  | { type: 'schedule_task'; agent: string; run_at: string | null; description: string }
+  | { type: 'cancel' }
+  | { type: 'new_conversation' }
+  | { type: 'load_conversation'; id: string }
+  | { type: 'list_conversations' };
 
 export type ServerMessage =
   | { type: 'thinking' }
@@ -129,4 +176,10 @@ export type ServerMessage =
   | { type: 'response_complete'; content: string }
   | { type: 'error'; message: string }
   | { type: 'status'; eye_state: EyeState; model: ModelId }
-  | { type: 'memory_update'; memories: Memory[] };
+  | { type: 'memory_update'; memories: Memory[] }
+  | { type: 'conversation_history'; id: string; messages: HistoryMessage[] }
+  | { type: 'conversations_list'; conversations: Conversation[] }
+  | { type: 'conversation_started'; id: string; title: string }
+  | { type: 'skills_update'; skills: Skill[] }
+  | { type: 'activity_update'; entries: ActivityEntry[] }
+  | { type: 'task_scheduled'; id: string; agent: string; run_at: string | null; description: string };

@@ -5,12 +5,14 @@ import {
   EyeState, ModelId, AccessTier,
   Message, Tool, ToolCall,
   Memory, Curiosity, InnerTruth, PartnershipDynamic, Breakthrough,
+  Conversation, Skill, ActivityEntry, ScheduledTask,
   ServerMessage,
 } from '@/lib/types';
 import { ArgusConnection } from '@/lib/connection';
 import { parseArtifacts } from '@/lib/artifacts';
 import { DEFAULT_TOOLS, WS_URL } from '@/lib/constants';
 import { getModelTier } from '@/lib/models';
+import { PRIMARY_CODER } from '@/lib/builder';
 import { RealConnection } from './useWebSocket';
 
 // ─── Dev-mode seed data (only loaded when no WS_URL is set) ───────────────
@@ -102,14 +104,46 @@ interface AgentStore {
   vaultKeys: string[];
   mcpServers: string[];
 
+  // Conversation history
+  conversations: Conversation[];
+  currentConversationId: string | null;
+  currentConversationTitle: string;
+
+  // Skills + Activity
+  skills: Skill[];
+  activity: ActivityEntry[];
+
+  // Tool toggles (allied models only; anthropic always on)
+  toolsEnabled: Record<string, boolean>;
+
+  // Task scheduler
+  scheduledTasks: ScheduledTask[];
+
+  // NexusCore pulse intensity (0-14, driven by tool activity)
+  corePulse: number;
+
+  // UI chrome (command palette + layout)
+  mindView: 'mind' | 'field' | 'flow' | 'schedule';
+  eyesCollapsed: boolean;
+  mindCollapsed: boolean;
+
   // Internal
   _ws: ArgusConnection | null;
 
   // Actions
   sendMessage: (content: string) => void;
+  setMindView: (view: 'mind' | 'field' | 'flow' | 'schedule') => void;
+  setEyesCollapsed: (collapsed: boolean) => void;
+  setMindCollapsed: (collapsed: boolean) => void;
+  expandAllPanels: () => void;
+  summonBuilder: () => void;
   switchModel: (model: ModelId) => void;
   setEyeState: (state: EyeState) => void;
+  setModelTools: (model: string, enabled: boolean) => void;
+  scheduleTask: (agent: string, runAt: string | null, description: string) => void;
   initConnection: () => void;
+  newConversation: () => void;
+  loadConversation: (id: string) => void;
   _handleServerMessage: (msg: ServerMessage) => void;
 }
 
@@ -123,7 +157,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   // Agent state — prod starts watching, dev same
   eyeState: 'watching',
-  activeModel: 'grok-fast',
+  activeModel: 'grok-build',
   accessTier: 'royal',
   isStreaming: false,
 
@@ -145,6 +179,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   vaultKeys: [],
   mcpServers: [],
 
+  conversations: [],
+  currentConversationId: null,
+  currentConversationTitle: '',
+
+  skills: [],
+  activity: [],
+
+  toolsEnabled: {
+    'grok': true,
+    'grok-build': true,
+    'grok-multi': true,
+    'gemini-flash': true,
+  },
+  scheduledTasks: [],
+  corePulse: 4,
+
+  mindView: 'mind',
+  eyesCollapsed: false,
+  mindCollapsed: false,
+
   _ws: null,
 
   // ─── Server message handler ────────────────────────────────────────────
@@ -152,11 +206,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   _handleServerMessage: (msg: ServerMessage) => {
     switch (msg.type) {
       case 'connected':
-        set({
+        set((prev) => ({
           connected: true,
           vaultKeys: msg.vault_keys ?? [],
           mcpServers: msg.mcp_servers ?? [],
-        });
+          // Sync to whatever model the daemon actually started with
+          activeModel: (msg.model as ModelId) ?? prev.activeModel,
+          accessTier: msg.model ? getModelTier(msg.model as ModelId) : prev.accessTier,
+        }));
         break;
 
       case 'thinking':
@@ -164,26 +221,37 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         break;
 
       case 'tool_call': {
+        // Rust sends call_id (snake_case); TypeScript declared callId — handle both
+        const callId = (msg as any).call_id ?? (msg as any).callId ?? 'unknown';
         const tc: ToolCall = {
-          id: msg.callId,
+          id: callId,
           name: msg.name,
           args: msg.args,
           state: 'executing',
           startedAt: new Date(),
         };
+        const now = new Date();
+        const entry: ActivityEntry = {
+          id: 'act-' + callId,
+          kind: 'tool',
+          label: msg.name,
+          ts: now.toISOString(),
+        };
         set((prev) => ({
           eyeState: 'executing',
           activeToolCalls: [...prev.activeToolCalls, tc],
+          corePulse: Math.min(14, prev.corePulse + 3),
+          activity: [entry, ...prev.activity].slice(0, 50),
           tools: prev.tools.map((t) =>
             t.name === msg.name ? { ...t, state: 'active' as const } : t
           ),
           messages: [
             ...prev.messages,
             {
-              id: 'tc-' + msg.callId,
+              id: 'tc-' + callId,
               role: 'assistant' as const,
               content: '',
-              timestamp: new Date(),
+              timestamp: now,
               toolCalls: [tc],
             },
           ],
@@ -193,18 +261,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
       case 'tool_result': {
         const now = new Date();
+        const callId = (msg as any).call_id ?? (msg as any).callId ?? 'unknown';
         set((prev) => ({
           activeToolCalls: prev.activeToolCalls.map((tc) =>
-            tc.id === msg.callId
+            tc.id === callId
               ? { ...tc, result: msg.result, success: msg.success, state: 'complete' as const, completedAt: now }
               : tc
           ),
+          corePulse: Math.max(2, prev.corePulse - 1),
           messages: prev.messages.map((m) => {
-            if (!m.toolCalls?.some((tc) => tc.id === msg.callId)) return m;
+            if (!m.toolCalls?.some((tc) => tc.id === callId)) return m;
             return {
               ...m,
               toolCalls: m.toolCalls.map((tc) =>
-                tc.id === msg.callId
+                tc.id === callId
                   ? { ...tc, result: msg.result, success: msg.success, state: 'complete' as const, completedAt: now }
                   : tc
               ),
@@ -243,6 +313,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           isStreaming: false,
           eyeState: 'complete',
           activeToolCalls: [],
+          corePulse: 3,
         }));
         setTimeout(() => set({ eyeState: 'watching' }), 1500);
         break;
@@ -254,6 +325,54 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
       case 'memory_update':
         set({ memories: msg.memories });
+        break;
+
+      case 'skills_update':
+        set({ skills: msg.skills });
+        break;
+
+      case 'activity_update':
+        set((prev) => ({ activity: [...msg.entries, ...prev.activity].slice(0, 50) }));
+        break;
+
+      case 'conversations_list':
+        set({ conversations: msg.conversations });
+        break;
+
+      case 'conversation_started':
+        set({
+          currentConversationId: msg.id,
+          currentConversationTitle: msg.title,
+          messages: [],
+        });
+        break;
+
+      case 'conversation_history': {
+        // Rebuild Message objects from persisted role/content pairs.
+        const loaded: Message[] = msg.messages.map((m, i) => ({
+          id: `hist-${msg.id}-${i}`,
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          timestamp: new Date(),
+        }));
+        set({ currentConversationId: msg.id, messages: loaded });
+        break;
+      }
+
+      case 'task_scheduled':
+        set((prev) => ({
+          scheduledTasks: [
+            {
+              id: msg.id,
+              agent: msg.agent as ModelId,
+              runAt: msg.run_at,
+              description: msg.description,
+              status: 'pending' as const,
+              createdAt: new Date().toISOString(),
+            },
+            ...prev.scheduledTasks,
+          ],
+        }));
         break;
 
       case 'error':
@@ -309,7 +428,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       ],
     }));
 
-    get()._ws!.send({ type: 'user_message', content });
+    get()._ws?.send({ type: 'user_message', content });
   },
 
   switchModel: (model: ModelId) => {
@@ -318,4 +437,33 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   setEyeState: (state: EyeState) => set({ eyeState: state }),
+
+  setModelTools: (model: string, enabled: boolean) => {
+    set((prev) => ({ toolsEnabled: { ...prev.toolsEnabled, [model]: enabled } }));
+    get()._ws?.send({ type: 'set_model_tools', model, enabled });
+  },
+
+  scheduleTask: (agent: string, runAt: string | null, description: string) => {
+    get()._ws?.send({ type: 'schedule_task', agent, run_at: runAt, description });
+  },
+
+  newConversation: () => {
+    get()._ws?.send({ type: 'new_conversation' });
+  },
+
+  loadConversation: (id: string) => {
+    get()._ws?.send({ type: 'load_conversation', id });
+  },
+
+  setMindView: (view) => set({ mindView: view, mindCollapsed: false }),
+  setEyesCollapsed: (collapsed) => set({ eyesCollapsed: collapsed }),
+  setMindCollapsed: (collapsed) => set({ mindCollapsed: collapsed }),
+  expandAllPanels: () => set({ eyesCollapsed: false, mindCollapsed: false }),
+
+  summonBuilder: () => {
+    const store = get();
+    store.setModelTools(PRIMARY_CODER, true);
+    store.switchModel(PRIMARY_CODER);
+    set({ eyesCollapsed: false, mindCollapsed: false });
+  },
 }));

@@ -1,6 +1,6 @@
 //! Semantic embedding layer for Argus
 //!
-//! Converts text → 768-dim vectors via google/gemini-embedding-001 on OpenRouter.
+//! Converts text → 3072-dim vectors via google/gemini-embedding-2 on OpenRouter.
 //! Stores vectors in Supabase pgvector tables.
 //! Searches all three surfaces (memories, discourse, conversations) simultaneously.
 //!
@@ -17,10 +17,10 @@ use crate::supabase::{SupabaseClient, DiscoursePost, DiscourseRecord};
 
 // ── Embedding model ───────────────────────────────────────────────────────
 
-/// google/gemini-embedding-001 via OpenRouter
-/// 768-dimensional output, optimized for semantic similarity
-pub const EMBEDDING_MODEL: &str = "google/gemini-embedding-001";
-pub const EMBEDDING_DIMS: usize = 768;
+/// google/gemini-embedding-2 via OpenRouter
+/// 3072-dimensional output, full native resolution — maximum semantic fidelity
+pub const EMBEDDING_MODEL: &str = "google/gemini-embedding-2";
+pub const EMBEDDING_DIMS: usize = 3072;
 
 // ── Result types ──────────────────────────────────────────────────────────
 

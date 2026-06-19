@@ -196,6 +196,16 @@ export function SentryDropdown() {
                 </div>
               </div>
 
+              {/* Shell policy */}
+              <div className="px-3 py-2 border-t border-argus-border" style={{ background: 'rgba(255,255,255,0.02)' }}>
+                <div className="text-[9px] font-mono tracking-widest uppercase text-argus-textDim mb-1">Shell Policy</div>
+                <div className="text-[10px] font-mono leading-relaxed text-argus-textDim space-y-0.5">
+                  <div><span style={{ color: '#39d353' }}>LOW</span> → execute</div>
+                  <div><span style={{ color: '#f5b800' }}>MEDIUM</span> → execute + warn</div>
+                  <div><span style={{ color: '#ff5577' }}>HIGH</span> → Sonnet review gate</div>
+                </div>
+              </div>
+
               {/* Footer */}
               <div className="px-3 py-1.5 border-t border-argus-border">
                 <button

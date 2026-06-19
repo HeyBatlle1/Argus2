@@ -9,6 +9,18 @@ use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// Metadata about a persisted conversation (web, telegram, discord).
+#[derive(Debug, Clone)]
+pub struct ConversationMeta {
+    pub id: String,
+    pub title: String,
+    pub surface: String,
+    pub model: Option<String>,
+    pub message_count: i64,
+    pub started_at: String,
+    pub last_active_at: String,
+}
+
 /// SQLite-backed memory store
 pub struct SqliteMemory {
     conn: Mutex<Connection>,
@@ -60,17 +72,47 @@ impl SqliteMemory {
             "ALTER TABLE conversation_history ADD COLUMN model TEXT;"
         );
 
+        // Conversation metadata — one row per named conversation (web/discord).
+        // Telegram uses integer chat_id in conversation_history; web uses these tables.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New Conversation',
+                surface TEXT NOT NULL DEFAULT 'web',
+                model TEXT,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS web_conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                model TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_web_conv ON web_conversation_history(conversation_id, id);",
+        )
+        .map_err(|e| format!("Failed to create conversation tables: {}", e))?;
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Open using the default path (~/.argus/memory.db)
+    /// Open using the default path.
+    /// Respects ARGUS_DATA_DIR env var (persistent volume in Docker).
+    /// Falls back to ~/.argus/memory.db for local dev.
     pub fn open_default() -> Result<Self, String> {
-        let path = dirs::home_dir()
-            .ok_or_else(|| "No home directory".to_string())?
-            .join(".argus")
-            .join("memory.db");
+        let path = if let Ok(data_dir) = std::env::var("ARGUS_DATA_DIR") {
+            std::path::PathBuf::from(data_dir).join("memory.db")
+        } else {
+            dirs::home_dir()
+                .ok_or_else(|| "No home directory".to_string())?
+                .join(".argus")
+                .join("memory.db")
+        };
         Self::open(path)
     }
 
@@ -116,6 +158,126 @@ impl SqliteMemory {
             }
         }
         Ok(history)
+    }
+
+    /// Persist web conversation history keyed by string conversation ID.
+    /// Replaces all existing messages for that conversation. Keeps last 40.
+    pub fn save_history_str(&self, conversation_id: &str, messages: &[ConversationMessage]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM web_conversation_history WHERE conversation_id = ?1",
+            params![conversation_id],
+        ).map_err(|e| format!("Failed to clear web history: {}", e))?;
+
+        let start = messages.len().saturating_sub(40);
+        for msg in &messages[start..] {
+            conn.execute(
+                "INSERT INTO web_conversation_history (conversation_id, role, content, model) VALUES (?1, ?2, ?3, ?4)",
+                params![conversation_id, msg.role, msg.content, msg.model],
+            ).map_err(|e| format!("Failed to save web history turn: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Load web conversation history by string conversation ID.
+    pub fn load_history_str(&self, conversation_id: &str) -> Result<Vec<ConversationMessage>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, content, model FROM web_conversation_history WHERE conversation_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok(ConversationMessage {
+                    role:    row.get(0)?,
+                    content: row.get(1)?,
+                    model:   row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut history = Vec::new();
+        for row in rows {
+            if let Ok(msg) = row { history.push(msg); }
+        }
+        Ok(history)
+    }
+
+    /// Insert or update conversation metadata. Title is only set on creation;
+    /// subsequent calls update model, message_count, and last_active_at.
+    pub fn upsert_conversation(
+        &self,
+        id: &str,
+        title: &str,
+        surface: &str,
+        model: Option<&str>,
+        message_count: usize,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO conversations (id, title, surface, model, message_count)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               model         = excluded.model,
+               message_count = excluded.message_count,
+               last_active_at = datetime('now')",
+            params![id, title, surface, model, message_count as i64],
+        ).map_err(|e| format!("Failed to upsert conversation: {}", e))?;
+        Ok(())
+    }
+
+    /// Return metadata for the most recently active conversation.
+    pub fn latest_conversation(&self) -> Result<Option<ConversationMeta>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, surface, model, message_count, started_at, last_active_at
+                 FROM conversations ORDER BY last_active_at DESC LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map([], |row| {
+                Ok(ConversationMeta {
+                    id:             row.get(0)?,
+                    title:          row.get(1)?,
+                    surface:        row.get(2)?,
+                    model:          row.get(3)?,
+                    message_count:  row.get(4)?,
+                    started_at:     row.get(5)?,
+                    last_active_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(rows.next().and_then(|r| r.ok()))
+    }
+
+    /// List recent conversations ordered by last active, newest first.
+    pub fn list_conversations(&self, limit: usize) -> Result<Vec<ConversationMeta>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, surface, model, message_count, started_at, last_active_at
+                 FROM conversations ORDER BY last_active_at DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(ConversationMeta {
+                    id:             row.get(0)?,
+                    title:          row.get(1)?,
+                    surface:        row.get(2)?,
+                    model:          row.get(3)?,
+                    message_count:  row.get(4)?,
+                    started_at:     row.get(5)?,
+                    last_active_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows {
+            if let Ok(meta) = row { result.push(meta); }
+        }
+        Ok(result)
     }
 }
 

@@ -89,7 +89,7 @@ Possibly better for the kind of thinking we're describing.
 
 ## SQL SCHEMA
 
-Run on project YOUR_SUPABASE_PROJECT_ID:
+Run on project xzkpvzpdkbjpavupgncu:
 
 ```sql
 CREATE TABLE IF NOT EXISTS argus_agent_discourse (

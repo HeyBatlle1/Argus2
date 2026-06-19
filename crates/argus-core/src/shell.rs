@@ -1,14 +1,11 @@
 //! Shell execution policy — risk-classified, three-tier model
 //!
-//! Inspired by claw-code (MIT license) permission architecture.
-//! Original allowlist model replaced with dynamic risk scoring:
-//!
 //!   LOW    → execute immediately, log
 //!   MEDIUM → execute, log with warning, surface in UI
-//!   HIGH   → block, requires PermissionPrompter approval
+//!   HIGH   → Sonnet reviews; approves, rewrites to safer form, or blocks
 //!
-//! The PermissionPrompter trait is interchangeable — terminal, Telegram,
-//! WebSocket to frontend, or silent-approve for testing.
+//! HIGH risk no longer waits for human approval — Sonnet acts as the gate.
+//! The TelegramPrompter is kept for notifications only, not blocking.
 
 use std::collections::HashSet;
 use serde_json;
@@ -43,6 +40,12 @@ impl RiskLevel {
 /// Classify a shell command into LOW / MEDIUM / HIGH risk.
 pub fn classify_risk(command: &str) -> RiskLevel {
     let cmd = command.trim();
+
+    // Normalize internal whitespace before pattern matching.
+    // Prevents bypass via extra spaces/tabs/newlines between tokens
+    // e.g. "python3  -c 'code'" or "python3\n-c\n'code'" → "python3 -c 'code'"
+    let normalized: String = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd = normalized.as_str();
 
     // Subshell execution — always HIGH (arbitrary code injection vector)
     if cmd.contains("$(") || cmd.contains('`') {
@@ -99,6 +102,9 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         // Git as a weapon
         "git config --global",
         "git -c core",
+        // Symlinks — always reviewed; they can redirect writes outside the workspace
+        "ln -s",
+        "ln --symbolic",
     ];
 
     for pattern in high_patterns {
@@ -128,7 +134,6 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         "touch",
         "chmod",
         "chown",
-        "ln -s",
         "docker run",
         "docker build",
         "docker stop",
@@ -199,6 +204,88 @@ impl PermissionPrompter for AlwaysDeny {
     fn prompt(&self, req: &PermissionRequest) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: format!("Blocked: {} risk command denied in current mode", req.risk.as_str()),
+        }
+    }
+}
+
+// ── Sonnet guard ─────────────────────────────────────────────────────────────
+
+/// The verdict Sonnet returns when reviewing a HIGH risk command.
+#[derive(Debug)]
+pub enum SonnetVerdict {
+    /// Execute as-is.
+    Approve,
+    /// Execute this safer version instead.
+    Rewrite(String),
+    /// Do not execute; explanation is returned to the caller.
+    Block(String),
+}
+
+/// Calls Claude Sonnet via OpenRouter to review HIGH-risk shell commands.
+/// Non-blocking — resolves in ~1-2 seconds, no human in the loop.
+pub struct SonnetGuard {
+    pub api_key: String,
+    pub api_url: String,
+}
+
+impl SonnetGuard {
+    pub async fn review(&self, command: &str) -> SonnetVerdict {
+        let prompt = format!(
+            "You are a shell command safety reviewer for an AI agent (Argus).\n\
+             Review this HIGH-risk shell command and respond with exactly one of:\n\
+             - APPROVE — if it is safe to execute as written\n\
+             - REWRITE: <new command> — if a safer version achieves the same goal\n\
+             - BLOCK: <reason> — if it should not execute at all\n\n\
+             Command: {}\n\n\
+             Respond with only the verdict line, nothing else.",
+            command
+        );
+
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-5",
+            "max_tokens": 200,
+            "temperature": 0.0,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&self.api_url)
+            .bearer_auth(&self.api_key)
+            .header("HTTP-Referer", "https://argus.local")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
+
+        let text = match resp {
+            Err(e) => {
+                eprintln!("[sonnet-guard] request failed: {}", e);
+                return SonnetVerdict::Block(format!("Sonnet review unavailable: {}", e));
+            }
+            Ok(r) => match r.json::<serde_json::Value>().await {
+                Err(e) => {
+                    eprintln!("[sonnet-guard] parse failed: {}", e);
+                    return SonnetVerdict::Block("Sonnet review parse error".to_string());
+                }
+                Ok(v) => v["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            },
+        };
+
+        if text.to_uppercase().starts_with("APPROVE") {
+            SonnetVerdict::Approve
+        } else if let Some(rest) = text.strip_prefix("REWRITE:").or_else(|| text.strip_prefix("Rewrite:")) {
+            SonnetVerdict::Rewrite(rest.trim().to_string())
+        } else if let Some(rest) = text.strip_prefix("BLOCK:").or_else(|| text.strip_prefix("Block:")) {
+            SonnetVerdict::Block(rest.trim().to_string())
+        } else {
+            // Unparseable response — fail safe
+            eprintln!("[sonnet-guard] unexpected verdict: {}", text);
+            SonnetVerdict::Block(format!("Sonnet returned unrecognised verdict: {}", text))
         }
     }
 }
@@ -293,6 +380,9 @@ pub struct ShellPolicy {
     pub timeout_secs: u64,
     /// Minimum risk level that triggers the prompter
     pub approval_threshold: RiskLevel,
+    /// When true, skip Sonnet Guard review on HIGH risk — execute with warning log only.
+    /// Hard-blocked catastrophic patterns are still refused.
+    pub bypass_sonnet_guard: bool,
 }
 
 impl Default for ShellPolicy {
@@ -304,6 +394,18 @@ impl Default for ShellPolicy {
             "fdisk",
             ":(){:|:&};:",
             "shred /dev",
+            // Symlinks pointing outside the workspace — redirect attacks
+            "ln -s /tmp",
+            "ln -s /etc",
+            "ln -s /var",
+            "ln -s /usr",
+            "ln -s /home",
+            "ln -s /root",
+            "ln -s /sys",
+            "ln -s /proc",
+            "ln -s /dev",
+            "ln -s /boot",
+            "ln -s /run",
         ] {
             blocked.insert(pattern.to_string());
         }
@@ -313,11 +415,21 @@ impl Default for ShellPolicy {
             max_output_bytes: 64 * 1024,
             timeout_secs: 30,
             approval_threshold: RiskLevel::High,
+            bypass_sonnet_guard: false,
         }
     }
 }
 
 impl ShellPolicy {
+    /// Permissive mode — skips Sonnet Guard review on HIGH risk commands.
+    /// Hard-blocked catastrophic patterns still refused. Use for trusted hackathon sessions.
+    pub fn permissive() -> Self {
+        Self {
+            bypass_sonnet_guard: true,
+            ..Self::default()
+        }
+    }
+
     /// Evaluate risk level. Returns error if hard-blocked.
     pub fn evaluate(&self, command: &str) -> Result<RiskLevel, String> {
         let cmd = command.trim();

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./SOUL.md">Soul</a> · <a href="./THEORY.md">Theory</a> · <a href="./docs/SETUP.md">Setup</a> · <a href="./docs/SUPABASE_SCHEMA.sql">Schema</a> · <a href="LICENSE">MIT</a>
+  <strong>Power-user fork</strong> — synced from <a href="https://github.com/HeyBatlle1/Argus1">Argus1</a> lab (Argus1 stays R&D). See <a href="./docs/NORTH_STAR.md">North Star</a> · <a href="./docs/SETUP.md">Setup</a>
 </p>
 
 ---
@@ -21,7 +21,6 @@ Most of the friction in working with AI agents comes down to trust — not trust
 Named after Argus Panoptes — the hundred-eyed watchman of Greek mythology who never fully slept.
 
 Read [SOUL.md](./SOUL.md) to understand what this is and why it was built.
-Read [THEORY.md](./THEORY.md) to understand why the intranet and social loop matter.
 
 ---
 
@@ -35,19 +34,6 @@ A persistent agent that runs on your machine, remembers across sessions, reads y
 - What happens to the agent's behavior when you give it a social loop — other agents to post findings to, read from, respond to?
 
 Argus is a working attempt at answers. It's not finished, and some of the most interesting questions are still open.
-
----
-
-## Why we made these choices
-
-We wanted an agent that could run continuously with real filesystem access, code execution, and network access — and we wanted to be able to hand that to someone without making them nervous. That constraint shaped almost every decision:
-
-- **Encrypted vault + hardware keychain** — because plaintext secrets in config files are the first thing that goes wrong with anything that runs unattended
-- **Sandboxed execution** — because an agent that can run arbitrary code on your machine should run it somewhere you can contain
-- **Three-tier shell policy** — because not all commands carry the same stakes, and the human should be in the loop for the ones that do
-- **Cryptographic audit chain** — because "what did it do while I was away?" should have a tamper-evident answer
-
-These aren't claims about what the right approach is. They're the bets we made while trying to find out how far the collaboration could go when trust isn't the bottleneck.
 
 ---
 
@@ -75,7 +61,7 @@ Three Docker containers in production:
 |--------|------------|
 | Secrets in plaintext | ChaCha20-Poly1305 encrypted vault, master key in hardware keychain |
 | Container escape | Workspace exec server requires X-Argus-Auth header on every request |
-| Command injection | Three-tier risk classifier: LOW / MEDIUM / HIGH with Telegram approval loop |
+| Command injection | Three-tier risk classifier: LOW executes immediately, MEDIUM logs a warning, HIGH routes through Sonnet review before execution; Telegram notifies on consequential runs |
 | Interpreter bypass | Python, Node, Ruby, Perl one-liners classified HIGH risk |
 | SSRF / network exfiltration | Egress policy blocks RFC 1918, AWS IMDS, loopback, internal hostnames explicitly |
 | Arbitrary file writes | Path policy uses canonical path for both check and write; case-sensitive matching |
@@ -137,9 +123,9 @@ Embedding model: `google/gemini-embedding-001` (768-dim) via OpenRouter.
 
 ## Skill System
 
-Argus maintains a library of procedural skills — documented, reusable knowledge of *how* to approach recurring tasks.
+Argus maintains a library of procedural skills — documented, reusable knowledge of *how* to do things well.
 
-Declarative memory stores **what** Argus knows. Skills store **how** Argus operates. The distinction matters: a new model instance can inherit factual context via memory, but without procedural memory it still re-derives techniques from scratch on every session. Skills are an attempt to carry that forward.
+Declarative memory stores **what** Argus knows. Skills store **how** Argus operates. The distinction matters: a new model instance inherits context via memory, but without procedural memory it still has to re-derive techniques from scratch each time. Skills are the attempt to carry that forward.
 
 > *The instance changes. What was learned doesn't have to.*
 
@@ -149,20 +135,34 @@ Every agent turn runs a semantic search against `argus_skills` (HNSW pgvector, s
 
 After any turn that uses 3+ tool calls, a background Haiku task reflects on whether a genuinely reusable procedure was discovered. If yes, it writes a new skill to the library automatically, with embedding, and posts a Discord notification to `#findings`. The library grows from use.
 
----
+### Seed library (10 skills, May 2026)
 
-## Agent Discourse / Intranet
+| Skill | Category |
+|---|---|
+| Deep Research Sprint | research |
+| DMCA Evidence Package | investigation |
+| Rust Borrow Checker Resolution | rust |
+| Supabase RPC Integration | supabase |
+| Docker Stack Rebuild | operations |
+| Multi-Tool Investigation | research |
+| Memory Write Best Practice | memory |
+| Vault Key Management | security |
+| Artifact Generation | ui |
+| Investigative Chain of Custody | investigation |
 
-Argus runs a persistent social loop — not a pipeline. See [THEORY.md](./THEORY.md) for the full explanation.
+### Schema
 
-- `argus_agent_discourse` table in Supabase with pg_net trigger → Discord webhooks
-- Five channels: `#findings` `#questions` `#proposals` `#ops` `#general`
-- Agents auto-post findings after tool-heavy turns
-- Agents read recent discourse before starting tasks
-- Proposals (`requires_human_review: true`) ping @here for human approval
-- Discord inbound routes messages back to the agent
+```sql
+argus_skills (
+  id uuid, skill_name text UNIQUE,
+  trigger_description text, procedure_steps text,
+  model_created_by text, times_used int, success_rate numeric,
+  embedding vector(768), metadata jsonb,
+  created_at / updated_at / last_used / last_refined timestamptz
+)
+```
 
-One of the open questions we're exploring: does a social loop among agent instances — where findings compound over time across sessions and model swaps — produce meaningfully different behavior at longer time horizons? The infrastructure is there. The data is accumulating.
+RPCs: `search_skills(query_embedding, match_threshold, match_count)` — blends cosine similarity (70%), success rate (20%), usage signal (10%). `update_skill_usage(skill_id, success, refined_steps)` — increments usage and decays/improves success rate.
 
 ---
 
@@ -171,7 +171,7 @@ One of the open questions we're exploring: does a social loop among agent instan
 Every tool call, model call, and system event is logged to an append-only SQLite database with Merkle-chained SHA-256 entries. Each entry includes:
 
 - Timestamp (microseconds)
-- Agent identity + model version (separate fields)
+- Agent identity (`argus`) + model version (separate fields)
 - Action type
 - SHA-256 hash of arguments and result
 - Hash of previous entry (chain link)
@@ -191,10 +191,23 @@ The audit chain is what makes it possible to hand the agent real access without 
 | `MODEL_OPUS` | `anthropic/claude-opus-4-7` | Max intelligence |
 | `MODEL_GROK` | `x-ai/grok-4.3` | Standard Grok |
 | `MODEL_GROK_FAST` | `x-ai/grok-4.20` | Default model |
-| `MODEL_GROK_MULTI` | `x-ai/grok-4.20-multi-agent` | 16-agent parallel reasoning |
+| `MODEL_GROK_MULTI` | `x-ai/grok-4.20-multi-agent` | 16-agent parallel reasoning, no tool support |
 | `MODEL_GEMINI` | `google/gemini-3.1-pro-preview` | Google flagship |
 
 Models without tool support are detected automatically — tools are stripped from the request when not supported.
+
+---
+
+## Agent Discourse / Intranet
+
+- `argus_agent_discourse` table in Supabase with pg_net trigger → Discord webhooks
+- Five channels: `#findings` `#questions` `#proposals` `#ops` `#general`
+- Agents auto-post findings after tool-heavy turns
+- Agents read recent discourse before starting tasks
+- Proposals (`requires_human_review: true`) ping @here for approval
+- Discord inbound routes messages back to the agent
+
+One of the open questions we're exploring: does a social loop among agent instances — where findings compound over time across sessions and model swaps — produce meaningfully different behavior at longer time horizons? The infrastructure is there. The data is accumulating.
 
 ---
 
@@ -205,8 +218,6 @@ Models without tool support are detected automatically — tools are stripped fr
 ```
 
 Reads secrets from encrypted vault, exports to Docker environment, starts all three containers. No plaintext `.env` files.
-
-See [docs/SETUP.md](./docs/SETUP.md) for full setup instructions.
 
 ---
 
@@ -222,9 +233,9 @@ The **Moral Compass** and **Constitutional Framework** sections of [SOUL.md](./S
 
 | Item | Priority |
 |------|----------|
-| `cargo fmt` / `cargo clippy` workspace-wide clean pass | Low |
-| Linux Secret Service keychain testing | Low |
-| Windows Credential Manager testing | Low |
+| Discord inbound — wire `run_agent_turn` into `discord.rs` | Medium |
+| `argus-memory/src/supabase.rs` SupabaseMemory instantiation | Low |
+| 34 `.unwrap()` calls in production paths | Low |
 
 ---
 

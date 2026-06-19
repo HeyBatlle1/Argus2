@@ -71,7 +71,7 @@ New flow: 1 LLM call. Every time.
 
 ## Activation
 
-1. Run `docs/SEMANTIC_MEMORY_MIGRATION.sql` on Thought Factory (YOUR_SUPABASE_PROJECT_ID)
+1. Run `docs/SEMANTIC_MEMORY_MIGRATION.sql` on Thought Factory (xzkpvzpdkbjpavupgncu)
 2. Store OpenRouter key in vault (already done)
 3. Wire EmbeddingClient into daemon startup in main.rs:
 

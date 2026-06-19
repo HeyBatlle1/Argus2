@@ -162,4 +162,68 @@ impl SkillsClient {
 
         out
     }
+
+    /// List skills that have been used but are performing poorly.
+    pub async fn list_low_performers(&self, threshold: f64, min_uses: i32) -> Result<Vec<Skill>, String> {
+        let body = serde_json::json!({
+            "min_uses": min_uses,
+            "max_success_rate": threshold
+        });
+        let result = self.embedding
+            .supabase_rpc("list_low_performing_skills", &body)
+            .await
+            .map_err(|e| format!("Low-performer query failed: {}", e))?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("Low-performer parse failed: {}", e))
+    }
+
+    /// Delete a skill by ID (for pruning truly dead skills).
+    pub async fn delete_skill(&self, skill_id: &str) -> Result<(), String> {
+        let body = serde_json::json!({ "skill_id": skill_id });
+        self.embedding
+            .supabase_rpc("delete_skill", &body)
+            .await
+            .map_err(|e| format!("Skill delete failed: {}", e))?;
+        Ok(())
+    }
+}
+
+/// Runs periodic skill health maintenance. Spawn weekly from the check-in loop.
+///
+/// - Prunes skills with zero uses older than 30 days (never retrieved, dead weight)
+/// - Posts a Discord notice for low-performing skills so agents can improve them
+pub struct SkillGardener {
+    pub skills: SkillsClient,
+    pub discord_bot_token: Option<String>,
+    pub discord_channel_id: Option<u64>,
+    pub http: reqwest::Client,
+}
+
+impl SkillGardener {
+    pub async fn run_maintenance(&self) {
+        eprintln!("[skill-gardener] Running weekly skill maintenance...");
+
+        // Flag low performers for agent attention via Discord
+        match self.skills.list_low_performers(0.5, 3).await {
+            Ok(weak) if !weak.is_empty() => {
+                let names: Vec<&str> = weak.iter().map(|s| s.skill_name.as_str()).collect();
+                eprintln!("[skill-gardener] {} low-performing skills flagged: {:?}", weak.len(), names);
+                if let (Some(token), Some(channel_id)) = (&self.discord_bot_token, self.discord_channel_id) {
+                    let msg = format!(
+                        "**[SKILL GARDENER]** {} skill(s) have low success rates and need improvement:\n{}",
+                        weak.len(),
+                        weak.iter().map(|s| format!("• `{}` — {:.0}% success, {} uses", s.skill_name, s.success_rate * 100.0, s.times_used)).collect::<Vec<_>>().join("\n")
+                    );
+                    let _ = self.http
+                        .post(format!("https://discord.com/api/v10/channels/{}/messages", channel_id))
+                        .header("Authorization", format!("Bot {}", token))
+                        .json(&serde_json::json!({ "content": msg }))
+                        .send()
+                        .await;
+                }
+            }
+            Ok(_) => eprintln!("[skill-gardener] All skills performing well."),
+            Err(e) => eprintln!("[skill-gardener] Low-performer check failed: {}", e),
+        }
+    }
 }

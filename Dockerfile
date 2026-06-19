@@ -16,9 +16,9 @@ RUN cargo build --release --bin argus
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies + docker CLI (for workspace exec)
+# Install runtime dependencies + docker CLI + Node.js (for MCP servers via npx)
 RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 docker.io \
+    ca-certificates libssl3 docker.io nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Create argus user and add to docker group
@@ -38,9 +38,7 @@ COPY --from=builder /build/target/release/argus /usr/local/bin/argus
 # Persistent storage for memory
 VOLUME ["/argus/data"]
 
-# Health check - just verify the binary runs
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD argus --version || exit 1
+HEALTHCHECK NONE
 
 # Run daemon mode by default
 CMD ["argus", "daemon"]

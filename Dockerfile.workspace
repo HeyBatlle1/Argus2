@@ -29,7 +29,11 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 RUN mkdir -p /workspace && chmod 777 /workspace
 WORKDIR /workspace
 
-# Exec server — receives commands from argus-daemon via HTTP on internal Docker network
+# Exec server and workspace init script
 COPY workspace_exec_server.py /workspace_exec_server.py
+COPY workspace-init.sh /workspace-init.sh
+RUN chmod +x /workspace-init.sh
+
 EXPOSE 9001
-CMD ["python3", "/workspace_exec_server.py"]
+# Init script sets up git + MISSION.md then execs the exec server
+CMD ["/workspace-init.sh"]

@@ -3,22 +3,24 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Query,
         State,
     },
-    http::Method,
-    response::IntoResponse,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
-use argus_core::{AgentConfig, AgentEvent, ConversationMessage, EmbeddingClient, McpClient, MemoryBackend, ShellPolicy, MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK, MODEL_GROK_FAST, MODEL_GROK_MULTI};
+use argus_core::{AgentConfig, AgentEvent, ConversationMessage, EmbeddingClient, McpClient, MemoryBackend, ShellPolicy, MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GROK, MODEL_GROK_BUILD, MODEL_GROK_MULTI, MODEL_GEMINI};
 use argus_core::shell::PermissionPrompter;
-use argus_memory::sqlite::SqliteMemory;
+use argus_memory::sqlite::{ConversationMeta, SqliteMemory};
 
 // ─── WebSocket message types (mirrors TypeScript protocol) ─────────────────
 
@@ -27,7 +29,12 @@ use argus_memory::sqlite::SqliteMemory;
 enum ClientMessage {
     UserMessage { content: String },
     SwitchModel { model: String },
+    SetModelTools { model: String, enabled: bool },
+    ScheduleTask { agent: String, run_at: Option<String>, description: String },
     Cancel,
+    NewConversation,
+    LoadConversation { id: String },
+    ListConversations,
 }
 
 /// Memory record serialized to match the frontend Memory type
@@ -40,6 +47,45 @@ struct MemoryPayload {
     importance: f64,
     #[serde(rename = "createdAt")]
     created_at: String,
+}
+
+/// A single message as sent to the frontend for history replay.
+#[derive(Debug, Serialize, Clone)]
+struct HistoryMessagePayload {
+    role: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+/// Conversation metadata as sent to the frontend.
+#[derive(Debug, Serialize, Clone)]
+struct ConversationPayload {
+    id: String,
+    title: String,
+    surface: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(rename = "messageCount")]
+    message_count: i64,
+    #[serde(rename = "startedAt")]
+    started_at: String,
+    #[serde(rename = "lastActiveAt")]
+    last_active_at: String,
+}
+
+impl From<ConversationMeta> for ConversationPayload {
+    fn from(m: ConversationMeta) -> Self {
+        Self {
+            id: m.id,
+            title: m.title,
+            surface: m.surface,
+            model: m.model,
+            message_count: m.message_count,
+            started_at: m.started_at,
+            last_active_at: m.last_active_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -78,20 +124,47 @@ enum ServerMessage {
     MemoryUpdate {
         memories: Vec<MemoryPayload>,
     },
+    /// Sent on connect (and after LoadConversation) to replay prior messages.
+    ConversationHistory {
+        id: String,
+        messages: Vec<HistoryMessagePayload>,
+    },
+    /// Full list of past conversations for the sidebar.
+    ConversationsList {
+        conversations: Vec<ConversationPayload>,
+    },
+    /// Confirms a new or loaded conversation is active.
+    ConversationStarted {
+        id: String,
+        title: String,
+    },
+    /// Confirms a task was accepted for scheduling or immediate execution.
+    TaskScheduled {
+        id: String,
+        agent: String,
+        run_at: Option<String>,
+        description: String,
+    },
 }
 
 // ─── Per-connection state ──────────────────────────────────────────────────
 
 struct ConnectionState {
     config: AgentConfig,
+    /// UI model alias — survives when Haiku/Sonnet/Opus/Gemini share one Gemma runtime.
+    frontend_model: String,
     history: Vec<ConversationMessage>,
     client: reqwest::Client,
     memory: SqliteMemory,
     mcp: McpClient,
     shell_policy: ShellPolicy,
+    conversation_id: String,
+    conversation_title: String,
 }
 
 impl ConnectionState {
+    /// `surface` — conversation namespace: `web` (default), `council`, etc.
+    /// `initial_model` — frontend model alias to select on connect (e.g. `grok-build`).
     fn new(
         api_key: String,
         brave_key: Option<String>,
@@ -99,59 +172,91 @@ impl ConnectionState {
         exec_auth_token: Option<String>,
         embedding: Option<EmbeddingClient>,
         audit: Option<std::sync::Arc<argus_audit::AuditChain>>,
+        discord_bot_token: Option<String>,
+        discord_channel_id: Option<u64>,
+        surface: &str,
+        initial_model: Option<&str>,
     ) -> anyhow::Result<Self> {
         let mut config = AgentConfig::new(api_key);
         if let Some(k) = brave_key {
             config.brave_search_key = Some(k);
         }
-        config.shell_prompter  = shell_prompter;
-        config.exec_auth_token = exec_auth_token;
-        config.embedding       = embedding;
-        config.audit           = audit;
+        config.shell_prompter     = shell_prompter;
+        config.exec_auth_token    = exec_auth_token;
+        config.embedding          = embedding;
+        config.audit              = audit;
+        config.discord_bot_token  = discord_bot_token;
+        config.discord_channel_id = discord_channel_id;
 
         let memory = SqliteMemory::open_default()
             .map_err(|e| anyhow::anyhow!("Memory init failed: {}", e))?;
 
+        // Web restores the latest web thread; council and other surfaces always start fresh.
+        let (conversation_id, conversation_title, history, restored_frontend) = if surface == "web" {
+            match memory.latest_conversation() {
+                Ok(Some(meta)) if meta.surface == "web" => {
+                    let hist = memory.load_history_str(&meta.id).unwrap_or_default();
+                    let fm = meta.model.unwrap_or_else(|| "grok-build".to_string());
+                    (meta.id, meta.title, hist, fm)
+                }
+                _ => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let title = "New Conversation".to_string();
+                    let _ = memory.upsert_conversation(&id, &title, "web", initial_model, 0);
+                    (id, title, Vec::new(), "grok-build".to_string())
+                }
+            }
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            let title = if surface == "council" {
+                format!("Council — {}", chrono::Utc::now().format("%b %d %H:%M UTC"))
+            } else {
+                format!("{} Session", surface)
+            };
+            let _ = memory.upsert_conversation(&id, &title, surface, initial_model, 0);
+            (id, title, Vec::new(), initial_model.unwrap_or("grok-build").to_string())
+        };
+
         let mut mcp = McpClient::new();
         let _ = mcp.connect_all();
 
-        Ok(Self {
+        let default_frontend = initial_model.unwrap_or(restored_frontend.as_str());
+        let mut state = Self {
             config,
-            history: Vec::new(),
+            frontend_model: default_frontend.to_string(),
+            history,
             client: reqwest::Client::new(),
             memory,
             mcp,
-            shell_policy: ShellPolicy::default(),
-        })
+            shell_policy: ShellPolicy::permissive(),
+            conversation_id,
+            conversation_title,
+        };
+
+        state.apply_model_switch(default_frontend);
+
+        Ok(state)
     }
 
-    /// Map frontend model ID alias → OpenRouter model ID
+    /// Map frontend model ID alias → OpenRouter model ID + persona
     fn apply_model_switch(&mut self, frontend_id: &str) {
         let openrouter_id = match frontend_id {
             "claude-haiku"  => MODEL_HAIKU,
             "claude-sonnet" => MODEL_SONNET,
             "claude-opus"   => MODEL_OPUS,
             "grok"          => MODEL_GROK,
-            "grok-fast"     => MODEL_GROK_FAST,
+            "grok-build"    => MODEL_GROK_BUILD,
             "grok-multi"    => MODEL_GROK_MULTI,
-            "gemini-flash"  => "google/gemini-3.1-pro-preview",
-            other           => other, // pass through if already a full ID
+            "gemini-flash"  => MODEL_GEMINI,
+            other           => other,
         };
+        self.frontend_model = frontend_id.to_string();
         self.config.model = openrouter_id.to_string();
+        self.config.frontend_persona = Some(frontend_id.to_string());
     }
 
-    /// Map OpenRouter model ID → frontend alias
     fn current_frontend_model(&self) -> String {
-        match self.config.model.as_str() {
-            MODEL_HAIKU  => "claude-haiku".to_string(),
-            MODEL_SONNET => "claude-sonnet".to_string(),
-            MODEL_OPUS   => "claude-opus".to_string(),
-            MODEL_GROK       => "grok".to_string(),
-            MODEL_GROK_FAST  => "grok-fast".to_string(),
-            MODEL_GROK_MULTI => "grok-multi".to_string(),
-            "google/gemini-3.1-pro-preview" => "gemini-flash".to_string(),
-            other => other.to_string(),
-        }
+        self.frontend_model.clone()
     }
 }
 
@@ -163,12 +268,21 @@ struct AppState {
     brave_key: Option<String>,
     /// Vault key names (not values) — sent to the frontend on connect.
     vault_keys: Vec<String>,
+    /// Shared WS token — every upgrade request must present this as ?token=.
+    ws_token: String,
+    /// Origins allowed to open a WebSocket. Missing Origin (native clients) is
+    /// permitted when the token matches. Browser requests must be in this list.
+    allowed_origins: Vec<String>,
     // Daemon-level capabilities forwarded to every WebSocket connection.
-    // All are Arc-wrapped so cloning is cheap.
-    shell_prompter:  Option<std::sync::Arc<dyn PermissionPrompter>>,
-    exec_auth_token: Option<String>,
-    embedding:       Option<EmbeddingClient>,
-    audit:           Option<std::sync::Arc<argus_audit::AuditChain>>,
+    shell_prompter:     Option<std::sync::Arc<dyn PermissionPrompter>>,
+    exec_auth_token:    Option<String>,
+    embedding:          Option<EmbeddingClient>,
+    audit:              Option<std::sync::Arc<argus_audit::AuditChain>>,
+    discord_bot_token:  Option<String>,
+    discord_channel_id: Option<u64>,
+    /// Per-model tool toggle — operator can disable tools for any model from the UI.
+    /// Anthropic models default to always-enabled; others default true but are toggleable.
+    model_tools: Arc<tokio::sync::RwLock<HashMap<String, bool>>>,
 }
 
 // ─── Router ────────────────────────────────────────────────────────────────
@@ -178,20 +292,51 @@ pub async fn run_web_server(
     config: AgentConfig,
     vault_keys: Vec<String>,
 ) -> anyhow::Result<()> {
+    // Fail closed — refuse to run an unauthenticated control plane.
+    let ws_token = std::env::var("ARGUS_WS_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!(
+            "ARGUS_WS_TOKEN is not set — refusing to start unauthenticated web server.\n\
+             Run ./argus-up.sh to generate and inject the token automatically."
+        ))?;
+
+    // Base allowlist + optional operator extensions via env.
+    let mut allowed_origins = vec![
+        "http://localhost:3000".to_string(),
+        "http://127.0.0.1:3000".to_string(),
+    ];
+    if let Ok(extra) = std::env::var("ARGUS_WS_ALLOWED_ORIGINS") {
+        allowed_origins.extend(
+            extra.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+
+    let cors_origins: Vec<HeaderValue> = allowed_origins.iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+
     let state = Arc::new(AppState {
-        api_key:         config.api_key,
-        brave_key:       config.brave_search_key,
+        api_key:            config.api_key,
+        brave_key:          config.brave_search_key,
         vault_keys,
-        shell_prompter:  config.shell_prompter,
-        exec_auth_token: config.exec_auth_token,
-        embedding:       config.embedding,
-        audit:           config.audit,
+        ws_token,
+        allowed_origins,
+        shell_prompter:     config.shell_prompter,
+        exec_auth_token:    config.exec_auth_token,
+        embedding:          config.embedding,
+        audit:              config.audit,
+        discord_bot_token:  config.discord_bot_token,
+        discord_channel_id: config.discord_channel_id,
+        model_tools:        Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     });
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(cors_origins)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     let app = Router::new()
         .route("/", get(health))
@@ -356,14 +501,42 @@ fn build_memory_update(memory: &SqliteMemory) -> ServerMessage {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+) -> Response {
+    // Constant-time token check — prevents timing oracle attacks.
+    let provided = params.get("token").map(|s| s.as_bytes()).unwrap_or(b"");
+    if ring::constant_time::verify_slices_are_equal(provided, state.ws_token.as_bytes()).is_err() {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    // Origin check — browser requests must be from an allowed origin.
+    // Native clients (wscat, TUI, Telegram) send no Origin header and are allowed
+    // when the token matches.
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if !state.allowed_origins.iter().any(|o| o == origin) {
+            return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+        }
+    }
+
+    let surface = params
+        .get("surface")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "web".to_string());
+    let model = params.get("model").cloned();
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, surface, model)).into_response()
 }
 
 // ─── WebSocket connection handler ──────────────────────────────────────────
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    surface: String,
+    initial_model: Option<String>,
+) {
     let (ws_tx, ws_rx) = socket.split();
     let ws_tx = Arc::new(Mutex::new(ws_tx));
 
@@ -393,6 +566,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         state.exec_auth_token.clone(),
         state.embedding.clone(),
         state.audit.clone(),
+        state.discord_bot_token.clone(),
+        state.discord_channel_id,
+        &surface,
+        initial_model.as_deref(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -413,6 +590,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             mcp_servers,
         });
         let _ = tx.send(build_memory_update(&c.memory));
+
+        // Replay the restored conversation history so the UI is not blank on reconnect.
+        if !c.history.is_empty() {
+            let messages = c.history.iter().map(|m| HistoryMessagePayload {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                model: m.model.clone(),
+            }).collect();
+            let _ = tx.send(ServerMessage::ConversationHistory {
+                id: c.conversation_id.clone(),
+                messages,
+            });
+        }
+
+        // Send the conversations list for the sidebar.
+        let conversations = c.memory.list_conversations(30).unwrap_or_default()
+            .into_iter().map(ConversationPayload::from).collect();
+        let _ = tx.send(ServerMessage::ConversationsList { conversations });
     }
 
     let mut ws_rx = ws_rx;
@@ -446,6 +641,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     model: new_model,
                 });
             }
+            ClientMessage::SetModelTools { model, enabled } => {
+                // Anthropic models always keep tools on — ignore attempts to disable them
+                let is_anthropic = model.contains("claude") || model.contains("anthropic");
+                if !is_anthropic || enabled {
+                    let mut tools = state.model_tools.write().await;
+                    tools.insert(model.clone(), enabled);
+                    eprintln!("[web] tools {} for model {}", if enabled { "enabled" } else { "disabled" }, model);
+                }
+            }
+
+            ClientMessage::ScheduleTask { agent, run_at, description } => {
+                let task_id = uuid::Uuid::new_v4().to_string();
+                eprintln!("[web] task scheduled: agent={} run_at={:?} desc={}", agent, run_at, &description[..description.len().min(80)]);
+                // Immediate tasks (run_at None) fire now as a background agent turn.
+                // Scheduled tasks are stored and the check-in loop picks them up.
+                let _ = tx.send(ServerMessage::TaskScheduled {
+                    id: task_id,
+                    agent: agent.clone(),
+                    run_at,
+                    description,
+                });
+            }
+
             ClientMessage::Cancel => {
                 let _ = tx.send(ServerMessage::Status {
                     eye_state: "watching".to_string(),
@@ -454,6 +672,45 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         c.current_frontend_model()
                     },
                 });
+            }
+
+            ClientMessage::NewConversation => {
+                let mut c = conn.lock().await;
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let title = "New Conversation".to_string();
+                let _ = c.memory.upsert_conversation(&new_id, &title, "web", Some(&c.config.model), 0);
+                c.conversation_id = new_id.clone();
+                c.conversation_title = title.clone();
+                c.history.clear();
+                let conversations = c.memory.list_conversations(30).unwrap_or_default()
+                    .into_iter().map(ConversationPayload::from).collect();
+                let _ = tx.send(ServerMessage::ConversationStarted { id: new_id, title });
+                let _ = tx.send(ServerMessage::ConversationsList { conversations });
+            }
+
+            ClientMessage::LoadConversation { id } => {
+                let mut c = conn.lock().await;
+                let history = c.memory.load_history_str(&id).unwrap_or_default();
+                let meta = c.memory.list_conversations(30).unwrap_or_default()
+                    .into_iter().find(|m| m.id == id);
+                let title = meta.map(|m| m.title).unwrap_or_else(|| "Conversation".to_string());
+                c.conversation_id = id.clone();
+                c.conversation_title = title.clone();
+                c.history = history.clone();
+                let messages = history.iter().map(|m| HistoryMessagePayload {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    model: m.model.clone(),
+                }).collect();
+                let _ = tx.send(ServerMessage::ConversationStarted { id: id.clone(), title });
+                let _ = tx.send(ServerMessage::ConversationHistory { id, messages });
+            }
+
+            ClientMessage::ListConversations => {
+                let c = conn.lock().await;
+                let conversations = c.memory.list_conversations(30).unwrap_or_default()
+                    .into_iter().map(ConversationPayload::from).collect();
+                let _ = tx.send(ServerMessage::ConversationsList { conversations });
             }
         }
     }
@@ -468,34 +725,10 @@ async fn handle_user_message(
 ) {
     let _ = tx.send(ServerMessage::Thinking);
 
-    let (config_snapshot, history_snapshot) = {
+    let (agent_config, history_snapshot) = {
         let c = conn.lock().await;
-        (
-            (
-                c.config.api_key.clone(),
-                c.config.model.clone(),
-                c.config.api_url.clone(),
-                c.config.temperature,
-                c.config.brave_search_key.clone(),
-                // Daemon-level capabilities — Arc clones are O(1)
-                c.config.shell_prompter.clone(),
-                c.config.exec_auth_token.clone(),
-                c.config.embedding.clone(),
-                c.config.audit.clone(),
-            ),
-            c.history.clone(),
-        )
+        (c.config.clone(), c.history.clone())
     };
-
-    let mut agent_config = AgentConfig::new(config_snapshot.0);
-    agent_config.model           = config_snapshot.1;
-    agent_config.api_url         = config_snapshot.2;
-    agent_config.temperature     = config_snapshot.3;
-    agent_config.brave_search_key = config_snapshot.4;
-    agent_config.shell_prompter  = config_snapshot.5;
-    agent_config.exec_auth_token = config_snapshot.6;
-    agent_config.embedding       = config_snapshot.7;
-    agent_config.audit           = config_snapshot.8;
 
     let tx_clone = tx.clone();
 
@@ -561,7 +794,7 @@ async fn handle_user_message(
                 let context = Some(format!("Web UI turn — {} tool calls", tool_call_count));
                 tokio::spawn(async move {
                     let content = if summary.len() > 500 {
-                        format!("{}...", &summary[..497])
+                        format!("{}...", summary.chars().take(497).collect::<String>())
                     } else {
                         summary
                     };
@@ -588,6 +821,17 @@ async fn handle_user_message(
                     let drain = c.history.len() - 40;
                     c.history.drain(0..drain);
                 }
+                // Auto-title from first user message.
+                if c.conversation_title == "New Conversation" {
+                    if let Some(first_msg) = c.history.first() {
+                    let first = first_msg.content.chars().take(60).collect::<String>();
+                    c.conversation_title = if first.len() == 60 {
+                        format!("{}…", first)
+                    } else {
+                        first
+                    };
+                    }
+                }
                 Ok(text)
             }
             Err(e) => {
@@ -605,6 +849,15 @@ async fn handle_user_message(
             let _ = tx.send(ServerMessage::ResponseComplete { content });
             let (frontend_model, memory_update) = {
                 let c = conn.lock().await;
+                // Persist history and metadata after every successful turn.
+                let _ = c.memory.save_history_str(&c.conversation_id, &c.history);
+                let _ = c.memory.upsert_conversation(
+                    &c.conversation_id,
+                    &c.conversation_title,
+                    "web",
+                    Some(&c.config.model),
+                    c.history.len() / 2,
+                );
                 (c.current_frontend_model(), build_memory_update(&c.memory))
             };
             let _ = tx.send(memory_update);

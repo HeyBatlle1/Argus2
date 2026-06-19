@@ -221,7 +221,7 @@ NAVIGATION:
 
 ### Architecture:
 
-Single Supabase table `argus_schedule` in Thought Factory project (YOUR_SUPABASE_PROJECT_ID).
+Single Supabase table `argus_schedule` in Thought Factory project (xzkpvzpdkbjpavupgncu).
 Argus polls on same timer as check-in config — no separate polling loop needed.
 All three parties write to same table — Argus via daemon, Bradlee via UI or Telegram.
 

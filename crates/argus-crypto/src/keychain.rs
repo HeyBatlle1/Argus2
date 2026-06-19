@@ -35,6 +35,9 @@ impl KeychainProvider {
             keyring::Error::NoEntry => KeychainError::NotFound,
             _ => KeychainError::Platform(e.to_string()),
         })?;
+        if encoded.len() % 2 != 0 {
+            return Err(KeychainError::Platform("Corrupted keychain entry: odd-length hex string".to_string()));
+        }
         (0..encoded.len()).step_by(2)
             .map(|i| u8::from_str_radix(&encoded[i..i+2], 16).map_err(|e| KeychainError::Platform(e.to_string())))
             .collect()

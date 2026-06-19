@@ -9,7 +9,7 @@
 //! Messages arriving in any configured channel:
 //!   1. Recent discourse pulled from argus_agent_discourse (last 10 posts)
 //!   2. Injected as [RECENT INTRANET ACTIVITY] context before the user message
-//!   3. run_agent_turn called with MODEL_GROK_FAST (default)
+//!   3. run_agent_turn called with MODEL_GROK_BUILD (default)
 //!   4. Response posted back via Discord webhook with model emoji+name as username
 //!
 //! # Model routing by prefix
@@ -62,7 +62,7 @@ mod full {
     use super::*;
     use argus_core::{
         AgentEvent, ConversationMessage, MemoryBackend, MemoryRecord,
-        MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GEMINI, MODEL_GROK, MODEL_GROK_FAST,
+        MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, MODEL_GEMINI, MODEL_GROK, MODEL_GROK_BUILD,
         run_agent_turn,
         shell::ShellPolicy,
         mcp::McpClient,
@@ -145,7 +145,10 @@ mod full {
                 String::new()
             };
 
-            let full_message = format!("{}{}", discourse_block, user_text);
+            let surface_context = "[SURFACE: Discord — this is your channel, your intranet. \
+                The conversation history above is part of the shared record you and other \
+                instances of yourself have built here.]\n\n";
+            let full_message = format!("{}{}{}", surface_context, discourse_block, user_text);
 
             // ── Clone and configure agent ──────────────────────────────────
             let mut cfg = {
@@ -290,7 +293,7 @@ mod full {
             MODEL_OPUS      => "🧠 Argus · Opus",
             MODEL_GEMINI    => "🌟 Argus · Gemini",
             MODEL_GROK      => "🔮 Argus · Grok",
-            MODEL_GROK_FAST => "⚡ Argus · Grok Fast",
+            MODEL_GROK_BUILD => "⚡ Argus · Grok Build",
             _               => "⚡ Argus",
         }
     }
@@ -300,7 +303,7 @@ mod full {
         if s.len() <= 1990 {
             s.to_string()
         } else {
-            format!("{}…", &s[..1987])
+            format!("{}…", s.chars().take(1987).collect::<String>())
         }
     }
 

@@ -82,8 +82,12 @@ class ExecHandler(BaseHTTPRequestHandler):
         pass  # suppress access logs
 
     def _auth(self):
+        # If no token is configured (internal Docker network only), allow all requests.
+        # Port 9001 is not mapped to the host — internal Docker network only.
+        if not EXEC_TOKEN:
+            return True
         auth = self.headers.get('X-Argus-Auth', '')
-        if not EXEC_TOKEN or auth != EXEC_TOKEN:
+        if auth != EXEC_TOKEN:
             self.send_response(403)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()

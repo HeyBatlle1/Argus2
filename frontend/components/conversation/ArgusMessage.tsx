@@ -25,7 +25,7 @@ export function ArgusMessage({ message, onOpenArtifact }: Props) {
   return (
     <div className="animate-fade-in">
       {message.content && (
-        <div className="argus-prose text-argus-text text-sm leading-relaxed">
+        <div className="message-glass argus-prose text-argus-text text-sm leading-relaxed px-4 py-3 rounded max-w-[92%]">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{

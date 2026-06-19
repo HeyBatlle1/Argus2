@@ -13,13 +13,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Config shape (matches argus_checkin_config table) ──────────────────────
+//
+// quiet_hours_start / quiet_hours_end are stored as plain integers in
+// Postgres (e.g. 23, 7) representing the hour boundary.  The old
+// Option<String> type caused serde to reject the entire row and fall back
+// to CheckinConfig::default(), silently ignoring the real interval_minutes
+// value.  Fixed to Option<i64> to match the actual column type.
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CheckinConfig {
     pub interval_minutes: i64,
     pub checkin_type: String,
-    pub quiet_hours_start: Option<String>, // "23:00"
-    pub quiet_hours_end: Option<String>,   // "07:00"
+    /// Hour at which quiet hours begin (0–23). Stored as integer in DB.
+    pub quiet_hours_start: Option<i64>,
+    /// Hour at which quiet hours end (0–23). Stored as integer in DB.
+    pub quiet_hours_end: Option<i64>,
     pub telegram_enabled: bool,
 }
 
@@ -28,8 +36,8 @@ impl Default for CheckinConfig {
         Self {
             interval_minutes: 60,
             checkin_type: "brief".to_string(),
-            quiet_hours_start: Some("23:00".to_string()),
-            quiet_hours_end: Some("07:00".to_string()),
+            quiet_hours_start: Some(23),
+            quiet_hours_end: Some(7),
             telegram_enabled: true,
         }
     }
@@ -141,6 +149,25 @@ impl SupabaseClient {
         Ok(())
     }
 
+    pub async fn patch(&self, url: &str, data: &Value) -> Result<(), String> {
+        let resp = self.client
+            .patch(url)
+            .header("Authorization", format!("Bearer {}", self.jwt))
+            .header("apikey", &self.jwt)
+            .header("Content-Type", "application/json")
+            .header("Prefer", "return=minimal")
+            .json(data)
+            .send()
+            .await
+            .map_err(|e| format!("Supabase PATCH failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Supabase PATCH error: {}", body));
+        }
+        Ok(())
+    }
+
     /// POST /rest/v1/rpc/{function} — call a Postgres function
     /// Used for pgvector similarity search (search_all_semantic, etc.)
     pub async fn rpc(&self, function: &str, params: &Value) -> Result<Value, String> {
@@ -193,6 +220,45 @@ impl SupabaseClient {
         let data = serde_json::to_value(post)
             .map_err(|e| format!("Serialize error: {}", e))?;
         self.insert("argus_agent_discourse", &data).await
+    }
+
+    // ── Triage queue ──────────────────────────────────────────────────────
+
+    pub async fn enqueue_triage(&self, entry: &crate::triage::TriageEntry) -> Result<(), String> {
+        let data = serde_json::to_value(entry)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+        self.insert("argus_triage_queue", &data).await
+    }
+
+    pub async fn read_pending_triage(&self) -> Result<Vec<serde_json::Value>, String> {
+        match self.select("argus_triage_queue", "select=*&disposition=eq.pending&order=created_at.asc&limit=20").await {
+            Ok(val) => Ok(val.as_array().cloned().unwrap_or_default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn mark_triage_processed(&self, id: &str, disposition: &str) -> Result<(), String> {
+        let url = format!(
+            "{}/rest/v1/argus_triage_queue?id=eq.{}",
+            self.base_url, id
+        );
+        let body = serde_json::json!({ "disposition": disposition });
+        self.patch(&url, &body).await
+    }
+
+    // ── Triage flags ──────────────────────────────────────────────────────
+
+    pub async fn write_triage_flag(&self, flag: &crate::triage::TriageFlag) -> Result<(), String> {
+        let data = serde_json::to_value(flag)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+        self.insert("argus_triage_flags", &data).await
+    }
+
+    pub async fn read_pending_flags(&self) -> Result<Vec<serde_json::Value>, String> {
+        match self.select("argus_triage_flags", "select=*&disposition=eq.pending&order=created_at.desc&limit=20").await {
+            Ok(val) => Ok(val.as_array().cloned().unwrap_or_default()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn read_upcoming_schedule(&self) -> Result<Value, String> {

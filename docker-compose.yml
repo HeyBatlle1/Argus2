@@ -14,13 +14,17 @@ services:
       - SUPABASE_ARGUS_SERVICE_KEY=${SUPABASE_ARGUS_SERVICE_KEY:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID:-}
+      - ARGUS_WS_TOKEN=${ARGUS_WS_TOKEN:-}
     ports:
-      - "8888:8888"
-      - "9000:9000"
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:9000:9000"
     volumes:
       - argus-data:/argus/data
       - workspace:/workspace
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ~/.argus/mcp.json:/home/argus/.argus/mcp.json:ro
     depends_on:
       - argus-workspace
     deploy:
@@ -37,15 +41,16 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.frontend
       args:
-        # NEXT_PUBLIC_* must be baked in at build time — this passes it to Dockerfile ARG
         - NEXT_PUBLIC_WS_URL=ws://localhost:9000/ws
     container_name: argus-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - NODE_ENV=production
       - ARGUS_DAEMON_URL=http://argus-daemon:9000
+      # Runtime only — served via /api/ws-token, never baked into client bundle
+      - ARGUS_WS_TOKEN=${ARGUS_WS_TOKEN:-}
     depends_on:
       - argus-daemon
     deploy:
@@ -64,8 +69,11 @@ services:
       - workspace:/workspace
     environment:
       - WORKSPACE_EXEC_TOKEN=${WORKSPACE_EXEC_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - ARGUS_TRIAGE_ACTIVE=${ARGUS_TRIAGE_ACTIVE:-0}
+      - ARGUS_DISCORD_ACTIVE=${ARGUS_DISCORD_ACTIVE:-0}
     ports:
-      - "8081:8081"   # Static file server — agent-created HTML pages (browsable on host)
+      - "127.0.0.1:8081:8081"   # Static file server — agent-created HTML pages (browsable on host)
     expose:
       - "9001"        # Exec server — internal Docker network only
     deploy:

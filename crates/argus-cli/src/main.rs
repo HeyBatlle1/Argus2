@@ -3,6 +3,7 @@
 mod checkin;
 mod discord;
 mod telegram;
+mod triage_loop;
 mod tui;
 mod web;
 
@@ -14,14 +15,19 @@ use argus_core::AgentConfig;
 use chrono;
 
 const LOGO: &str = r#"
-    ___    ____  ______  __  _______
-   /   |  / __ \/ ____/ / / / / ___/
-  / /| | / /_/ / / __/ / / / /\__ \
- / ___ |/ _, _/ /_/ / / /_/ /___/ /
-/_/  |_/_/ |_|\____/  \____//____/
+  ◉   ◎   ⊙   ✦   ◉   ◎   ⊙   ✦   ◉   ◎   ⊙
 
-    THE HUNDRED-EYED AGENT
-    Autonomous - Encrypted - Local
+     █████╗ ██████╗  ██████╗ ██╗   ██╗███████╗
+    ██╔══██╗██╔══██╗██╔════╝ ██║   ██║██╔════╝
+    ███████║██████╔╝██║  ███╗██║   ██║███████╗
+    ██╔══██║██╔══██╗██║   ██║██║   ██║╚════██║
+    ██║  ██║██║  ██║╚██████╔╝╚██████╔╝███████║
+    ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝
+
+        THE HUNDRED-EYED AGENT
+     ◉ watch  ·  ◎ think  ·  ⊙ act  ·  ✦ done
+
+  ✦   ⊙   ◎   ◉   ✦   ⊙   ◎   ◉   ✦   ⊙   ◎   ◉
 "#;
 
 #[derive(Parser)]
@@ -142,12 +148,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Vault { action }) => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
-            handle_vault_command(vault, action)?;
+            handle_vault_command(vault.as_mut().unwrap(), action)?;
         }
 
         Some(Commands::Tui { api_key }) => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            let vault = vault.as_mut().unwrap();
             let config = load_agent_config(vault, api_key)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -157,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         None => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            let vault = vault.as_mut().unwrap();
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -167,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Telegram { token }) => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            let vault = vault.as_mut().unwrap();
             let bot_token = if let Some(t) = token {
                 t
             } else {
@@ -181,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Web { port }) => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            let vault = vault.as_mut().unwrap();
             let config = load_agent_config(vault, None)?;
             if config.brave_search_key.is_none() {
                 eprintln!("[!] Brave Search not configured. Store key with: argus vault set brave_search_api_key YOUR_KEY");
@@ -192,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Discord) => {
-            let vault = vault.as_mut().ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+            let vault = vault.as_mut().unwrap();
             let mut config = load_agent_config(vault, None)?;
             let bot_token = vault.retrieve("discord_bot_token").ok()
                 .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok());
@@ -258,7 +263,8 @@ async fn main() -> anyhow::Result<()> {
 
             let bot_token = vault.as_ref()
                 .and_then(|v| v.retrieve("telegram_bot_token").ok())
-                .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok());
+                .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
+                .filter(|s| !s.is_empty());
 
             // Telegram chat ID for check-in messages (Bradlee's chat)
             let checkin_chat_id: Option<i64> = vault.as_ref()
@@ -267,17 +273,21 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|s| s.parse().ok());
 
             // Spawn check-in loop + build EmbeddingClient if Supabase is configured
+            let supabase_client: Option<argus_core::supabase::SupabaseClient>;
             let embedding_client = if let (Some(url), Some(key)) = (supabase_url, supabase_key) {
-                let supabase = argus_core::supabase::SupabaseClient::new(url, key);
-                if let (Some(token), Some(chat_id)) = (bot_token.clone(), checkin_chat_id) {
-                    checkin::spawn_checkin_loop(supabase.clone(), token, chat_id);
-                    println!("[+] Check-in loop started");
-                }
-                let ec = argus_core::EmbeddingClient::new(&config.api_key, supabase);
-                println!("[+] Semantic memory enabled (768-dim pgvector)");
+                let supabase = argus_core::supabase::SupabaseClient::new(url.clone(), key.clone());
+                // Thread Supabase creds into AgentConfig so tools can write to triage queue.
+                config.supabase_url = Some(url);
+                config.supabase_jwt = Some(key);
+                // Check-in loop is spawned later, after config is fully assembled
+                // (embedding, skills, shell_prompter, audit all wired in before spawn).
+                let ec = argus_core::EmbeddingClient::new(&config.api_key, supabase.clone());
+                println!("[+] Semantic memory enabled (3072-dim pgvector)");
+                supabase_client = Some(supabase);
                 Some(ec)
             } else {
                 println!("[!] Supabase not configured — check-in loop and semantic memory disabled");
+                supabase_client = None;
                 None
             };
             config.skills = embedding_client.as_ref().map(|ec| {
@@ -285,36 +295,47 @@ async fn main() -> anyhow::Result<()> {
             });
             config.embedding = embedding_client;
 
-            // Generate or retrieve the exec server auth token.
-            // Sent as X-Argus-Auth on every /exec request to argus-workspace.
-            // Stored in vault across restarts; new token generated on first run.
-            let exec_auth_token = vault.as_ref()
-                .and_then(|v| v.retrieve("workspace_exec_token").ok())
-                .or_else(|| std::env::var("WORKSPACE_EXEC_TOKEN").ok())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-            if let Some(ref mut v) = vault {
-                if v.retrieve("workspace_exec_token").is_err() {
-                    let _ = v.store("workspace_exec_token", &exec_auth_token);
-                }
-            }
-            // Surface the token to the host environment so argus-up.sh can export it
-            // to docker-compose, which passes it to argus-workspace as WORKSPACE_EXEC_TOKEN.
+            // Fresh token on every daemon start — never stored in vault.
+            // argus-up.sh reads WORKSPACE_EXEC_TOKEN from the environment
+            // and passes it to docker-compose → argus-workspace.
+            let exec_auth_token = uuid::Uuid::new_v4().to_string();
             std::env::set_var("WORKSPACE_EXEC_TOKEN", &exec_auth_token);
             config.exec_auth_token = Some(exec_auth_token);
 
-            // Wire shell prompter — HIGH risk commands require Telegram approval
+            // Wire Sonnet guard — HIGH risk shell commands are reviewed by Sonnet,
+            // not held waiting for human Telegram approval.
+            config.sonnet_guard = Some(std::sync::Arc::new(argus_core::shell::SonnetGuard {
+                api_key: config.api_key.clone(),
+                api_url: config.api_url.clone(),
+            }));
+            println!("[+] Sonnet guard enabled — HIGH risk shell commands reviewed by Sonnet");
+
+            // Keep Telegram prompter wired for non-shell approval notifications.
             config.shell_prompter = match (bot_token.clone(), checkin_chat_id) {
                 (Some(token), Some(chat_id)) => {
                     let prompter = argus_core::shell::TelegramPrompter { bot_token: token, chat_id };
-                    println!("[+] Shell prompter enabled (Telegram approval for HIGH risk)");
                     Some(std::sync::Arc::new(prompter))
                 }
-                _ => {
-                    println!("[!] Shell prompter disabled — HIGH risk commands will be blocked");
-                    None
-                }
+                _ => None,
             };
+
+            // Wire Discord credentials — gives agents direct read/write access to the channel.
+            let discord_bot_token = vault.as_ref()
+                .and_then(|v| v.retrieve("discord_bot_token").ok())
+                .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())
+                .filter(|s| !s.is_empty());
+            let discord_channel_id: Option<u64> = vault.as_ref()
+                .and_then(|v| v.retrieve("discord_channel_id").ok())
+                .or_else(|| std::env::var("DISCORD_CHANNEL_ID").ok())
+                .and_then(|s| s.trim().parse().ok());
+            if discord_bot_token.is_some() && discord_channel_id.is_some() {
+                println!("[+] Discord direct access enabled — agents can read/post to channel");
+            }
+            // Clone before move into config so triage_loop can use the values too.
+            let triage_discord_token   = discord_bot_token.clone();
+            let triage_discord_channel = discord_channel_id.map(|id| id.to_string());
+            config.discord_bot_token = discord_bot_token;
+            config.discord_channel_id = discord_channel_id;
 
             // ── Audit chain ────────────────────────────────────────────────
             // Open append-only audit DB, verify chain integrity on startup,
@@ -348,6 +369,71 @@ async fn main() -> anyhow::Result<()> {
                     // Log this daemon startup as a system event
                     let _ = chain.append(&config.model, "system", None,
                         Some("daemon_startup"), Some("ok"));
+
+                    // ── Crash sentinel + Discord startup post ──────────────
+                    // On every startup we check for a sentinel file that the
+                    // daemon writes on clean shutdown. If it's missing the
+                    // process was killed unexpectedly — we flag it as a crash.
+                    // Either way we post to #ops via discourse so there's always
+                    // a record in Discord when the daemon comes back up.
+                    let sentinel_path = format!("{}/daemon.sentinel", data_dir);
+                    let was_crash = !std::path::Path::new(&sentinel_path).exists();
+
+                    if let Some(ref sb) = supabase_client {
+                        let model = config.model.clone();
+                        let sb = sb.clone();
+                        let sentinel = sentinel_path.clone();
+                        tokio::spawn(async move {
+                            let (title, content) = if was_crash {
+                                (
+                                    "Daemon restarted after unexpected shutdown".to_string(),
+                                    format!(
+                                        "The daemon came back online but no clean shutdown sentinel was found.\n\n\
+                                        This means the process was killed, OOM'd, or the container restarted \
+                                        without a graceful exit.\n\n\
+                                        Model: {}\n\
+                                        Action: Review logs with `docker logs argus-daemon --tail 100`",
+                                        model
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "Daemon online".to_string(),
+                                    format!(
+                                        "Daemon started cleanly.\n\nModel: {}\nAll systems nominal.",
+                                        model
+                                    ),
+                                )
+                            };
+
+                            let post = argus_core::supabase::DiscoursePost {
+                                from_agent: "argus-daemon".to_string(),
+                                post_type: if was_crash { "finding".to_string() } else { "reflection".to_string() },
+                                content: format!("**{}**\n\n{}", title, content),
+                                task_context: Some("daemon_lifecycle".to_string()),
+                                requires_human_review: was_crash,
+                            };
+
+                            if let Err(e) = sb.write_discourse(&post).await {
+                                eprintln!("[!] Failed to post startup notice to discourse: {}", e);
+                            } else {
+                                println!("[+] Startup notice posted to Discord #ops");
+                            }
+
+                            // Write sentinel — signals next startup was clean
+                            let _ = std::fs::write(&sentinel, chrono::Utc::now().to_rfc3339());
+                        });
+                    }
+
+                    // Register shutdown handler to remove sentinel (signals clean exit)
+                    {
+                        let sentinel = sentinel_path.clone();
+                        tokio::spawn(async move {
+                            let _ = tokio::signal::ctrl_c().await;
+                            let _ = std::fs::remove_file(&sentinel);
+                            println!("[+] Clean shutdown — sentinel cleared");
+                        });
+                    }
 
                     let chain_arc = std::sync::Arc::new(chain);
 
@@ -386,15 +472,9 @@ async fn main() -> anyhow::Result<()> {
                         tokio::spawn(async move {
                             loop {
                                 let now = chrono::Utc::now();
-                                let next_midnight = match (now.date_naive() + chrono::Duration::days(1))
-                                    .and_hms_opt(0, 0, 0) {
-                                    Some(t) => t.and_utc(),
-                                    None => {
-                                        eprintln!("[!] Audit anchor: could not compute next midnight, retrying in 1h");
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-                                        continue;
-                                    }
-                                };
+                                let next_midnight = (now.date_naive() + chrono::Duration::days(1))
+                                    .and_hms_opt(0, 0, 0).unwrap()
+                                    .and_utc();
                                 let secs = (next_midnight - now).num_seconds().max(0) as u64;
                                 tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
 
@@ -414,23 +494,38 @@ async fn main() -> anyhow::Result<()> {
             };
             config.audit = audit_arc;
 
+            // Spawn check-in loop with fully-assembled config.
+            // Doing this here (rather than earlier in the Supabase block) ensures
+            // the agent receives embedding, skills, shell_prompter, and the audit
+            // chain — all capabilities that are wired in after Supabase is set up.
+            if let (Some(ref sb), Some(token), Some(chat_id)) = (
+                &supabase_client,
+                bot_token.as_deref(),
+                checkin_chat_id,
+            ) {
+                checkin::spawn_checkin_loop(sb.clone(), token.to_string(), chat_id, config.clone());
+                println!("[+] Check-in loop started (full agent capabilities)");
+
+                // Spawn triage gate alongside checkin loop.
+                // Haiku polls the queue every 30s, classifies posts, routes to
+                // Discord, flags failures. No tools in triage context — by design.
+                if let (Some(ref dt), Some(ref dc)) = (&triage_discord_token, &triage_discord_channel) {
+                    triage_loop::spawn_triage_loop(
+                        sb.clone(),
+                        config.clone(),
+                        dt.clone(),
+                        dc.clone(),
+                    );
+                    println!("[+] Triage gate active — Haiku watching the queue");
+                }
+            }
+
             // Start web server on port 9000 as a background task so the
             // Next.js frontend can connect via WebSocket while Telegram runs.
             // Pass the full daemon config so the web UI gets shell approval,
             // workspace auth, semantic memory, and audit — same capabilities as Telegram.
             {
-                let web_cfg = AgentConfig {
-                    api_key:         config.api_key.clone(),
-                    model:           config.model.clone(),
-                    api_url:         config.api_url.clone(),
-                    temperature:     config.temperature,
-                    brave_search_key: config.brave_search_key.clone(),
-                    shell_prompter:  config.shell_prompter.clone(),
-                    exec_auth_token: config.exec_auth_token.clone(),
-                    embedding:       config.embedding.clone(),
-                    skills:          config.skills.clone(),
-                    audit:           config.audit.clone(),
-                };
+                let web_cfg = config.clone(); // AgentConfig derives Clone
                 let web_vault_keys = vault.as_ref()
                     .map(|v| v.list_keys())
                     .unwrap_or_default();
@@ -445,16 +540,17 @@ async fn main() -> anyhow::Result<()> {
             match bot_token {
                 Some(token) => {
                     println!("[+] Telegram bot enabled");
-                    println!("[+] Daemon running (Ctrl+C to stop)");
-                    println!("Argus Telegram bot starting...");
-                    telegram::run_telegram_bot(token, config).await;
+                    tokio::spawn(async move {
+                        telegram::run_telegram_bot(token, config).await;
+                    });
                 }
                 None => {
                     println!("[!] No Telegram token found in vault or env - running idle");
-                    tokio::signal::ctrl_c().await?;
-                    println!("Daemon stopped");
                 }
             }
+            println!("[+] Daemon running (Ctrl+C to stop)");
+            tokio::signal::ctrl_c().await?;
+            println!("Daemon stopped");
         }
     }
 

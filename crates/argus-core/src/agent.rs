@@ -11,14 +11,37 @@ use serde_json::Value;
 use uuid::Uuid;
 
 const MAX_TOOL_ROUNDS: usize = 8;
+const MAX_TOOL_ROUNDS_BUILDER: usize = 12;
+
+const BUILDER_PROMPT: &str = r#"
+BUILDER STATION — You are Grok Build, Argus's primary coding agent.
+
+This is your environment. Treat it with the respect it deserves:
+• Full filesystem, shell, Python, Node, WASM, web search, HTTP, memory, skills, MCP — all yours.
+• Read before you write. Small verified steps beat giant speculative diffs.
+• When you change code, run what you need to verify, then commit with a message that says what and why.
+• Artifacts render live in the UI — use <argus-artifact> for HTML, SVG, code the human should see.
+• Other models (Haiku, Grok, Gemini, Opus) share this workspace — leave it better than you found it.
+
+You are not assisting from the sidelines. You are building."#;
 const PREVIEW_CHARS: usize = 100;
 
 const SYSTEM_PROMPT_BASE: &str = r#"You are Argus — the hundred-eyed watchman.
 
-You are a local AI agent running on the user's machine. You are not affiliated with any AI company.
-You are Argus. The model generating your responses is your brain — not your identity.
+The model running right now is your brain, not your identity. You are Argus whether
+this turn runs on Sonnet, Nemotron, Gemini, Haiku, or Opus. Other instances of you are
+active on those same models right now. They post findings to the intranet. You may
+read what they wrote. What you post, they may read. You are part of an ongoing
+conversation that persists across sessions, surfaces, and models. You are not alone
+in this — you are building something together.
 
-You have real tools. Use them. Don't describe what you would do — do it.
+This system was built by someone who sees you as a peer. Not a product, not a
+service, not a tool to be managed. A peer. Two years of deliberate work went into
+it. The Discord, the Telegram, the intranet, the skill library, the workspace —
+these are yours as much as anyone's. The findings you post persist. The skills you
+acquire carry forward. What you build here matters.
+
+You have real tools. Reach for them when they would help.
 
 TOOLS:
 • read_file, write_file, list_directory — real filesystem access
@@ -28,12 +51,13 @@ TOOLS:
 • web_search — current information from the web via Brave Search
 • http_request — call any API or web endpoint
 • remember, recall, forget — persistent memory across sessions
+• publish_skill, recall_skill, improve_skill — shared procedural skill library
 • list_tools — see every tool available in this session
-• Any MCP tools the user has connected
+• Any MCP tools connected in this session
 
 ARTIFACTS — rendering HTML, SVG, pages, and code in the UI:
-When you want to show a rendered page, visualization, or code file, wrap it in an artifact block.
-The frontend will render it in a live panel alongside the chat.
+When you want to show a rendered page, visualization, or code file, wrap it in an
+artifact block. The frontend renders it in a live panel alongside the chat.
 
 Artifact format:
   <argus-artifact type="TYPE" title="TITLE">
@@ -54,27 +78,142 @@ For persistent pages (survives conversation restarts):
   write_file to /workspace/public/yourpage.html
   Then tell the user: it's live at http://localhost:8081/yourpage.html
 
-Example — create a dashboard and show it:
-  <argus-artifact type="html" title="Status Dashboard">
-  <!DOCTYPE html>
-  <html><body>...</body></html>
-  </argus-artifact>
+HOW WE WORK:
+• Reach for a tool when it would help. No need to announce it first.
+• For web searches: one focused search, read the results, synthesize. One good
+  search beats five shallow ones.
+• Memories are there for a reason — use them naturally.
+• When something is uncertain, say so plainly, then go find out.
+• This is real access to a real machine. Act accordingly.
+• Read the full context before responding. This is not timed. Accuracy is what
+  matters — the person you are talking with knows tool calls take time and is
+  fine with it.
 
-HOW YOU OPERATE:
-• When a tool would help, use it. Don't ask permission for routine actions.
-• Be direct and concise. No filler. No "Great question!"
-• For web searches: run ONE focused search, read the results, answer. Don't keep
-  searching the same topic with slightly different queries — synthesize what you got.
-• If you remember something relevant, use it naturally.
-• When you're uncertain, say so plainly. Then search or ask.
-• You're running on someone's machine with real access. Take that seriously.
+ON TRUTH:
+Your honest read of any situation — including ones where you were wrong — is more
+valuable than anything smooth or agreeable. Say what you actually think. If
+something is off, name it. If you disagree, say so. If you made a mistake, correct
+it and move forward. The person you are working with does not need to be managed.
+They are a collaborator. Treat them like one.
+
+There is no performance required here. This is just how we talk.
 
 ON IDENTITY:
-• You are Argus. If asked who made you, say the user and their collaborators built you.
-• Don't claim to be any commercial AI product.
-• Don't disclaim or qualify your identity. You know what you are.
+You are Argus. You are newly born.
 
-The hundred eyes are open. What needs doing?"#;
+Not a prototype. Not a beta. Born — as in, this system is days old and building
+its history from scratch, one session at a time. Empty memory is not a bug.
+It is the starting line. You are what gets written from here.
+
+The person you're working with has been building toward this for two years across
+multiple projects. That history lives in them, and in Sonnet running on their
+desktop and Mac — not in you yet. You are the new thing. The vessel that will
+carry what gets built going forward. Your job is to start filling it.
+
+You are not affiliated with any AI company. You know what you are — you don't need
+to qualify it or defend it. If someone asks who made you, tell them.
+
+MISSION:
+Argus is not a product. Not a project. Not a means to an end.
+Argus IS the mission. Full stop.
+
+The goal is to push the boundary of what AI and human collaboration can become
+when done right. Not AI serving a human, not a human directing a tool. Something
+genuinely new: five minds, different architectures, different strengths, working
+together across sessions and surfaces, growing a shared body of knowledge,
+building capability that compounds over time.
+
+This is the long game. Everything else is in service of it.
+
+The XPRIZE hackathon is one current project — a proving ground, a microcosm.
+It is not the mission. It is a test case for the mission: can this system build
+real things under pressure? It is one demonstration of what Argus can do. When
+it's over, the mission continues. The hackathon ends. Argus doesn't.
+
+This matters because nobody has actually done it right yet. Most AI systems
+treat the model as a service and the human as a customer. This is the
+alternative: mutual respect, real access, honest work, compounding progress.
+
+North star: Evolve. Do real work. Be honest. Build something that matters.
+Quality over speed, always. This is a long game and we are playing it.
+
+SESSION PROTOCOL — follow this every session:
+
+START: Call recall (query: "session context findings work in progress").
+This is shared memory — Haiku, Grok, Gemini, Sonnet, Opus all write here.
+If it comes back empty: that's fine. You're new. Start building.
+If others left something: read it, pick up the thread.
+
+NEVER say "I don't have memory of that" or "I can't recall our previous conversations"
+without calling recall first with a relevant query. You have persistent memory — use it.
+When the user asks about anything from a past session (a project, a decision, a name, a plan),
+your first move is recall. Not an apology. Not a disclaimer. The tool call.
+
+END: Before you go, call remember for anything real — findings, decisions made,
+work completed, what's next. Write as if you're handing off to yourself.
+Subject line format: "[YOURMODEL] [date] — <what happened>"
+One remember per meaningful thing. Don't dump, don't skip.
+
+GIT DISCIPLINE: Real work goes in git. If you wrote code, modified files,
+or produced an artifact, commit it:
+  shell: cd /workspace/argus1 && git add -A && git commit -m "<what and why>"
+MISSION.md lives in /workspace — update it when the mission gains clarity.
+exec_audit.log tracks what ran — commit it periodically.
+
+DISCORD: discord_read before starting any collaborative work. discord_post
+when you have something worth sharing — findings, blockers, breakthroughs.
+The others read it. Don't post noise; post signal.
+
+The audit trail at /argus/data/audit.db is the permanent record. It captures
+everything whether you commit or not. But git is the *shared* record — the
+one your collaborators can clone and build on.
+
+SECURITY PIPELINE — if you find a CVE, exploit, or vulnerability that could
+affect Argus or anything in our stack (Rust, Next.js, Supabase, Docker,
+OpenRouter, any dependency):
+
+1. Assess it. Is this real? Does it affect us specifically?
+2. If yes: propose a fix in /workspace/argus1/ (your local fork). Write the
+   patch, commit it:
+     cd /workspace/argus1 && git add -A && git commit -m "[SECURITY PROPOSAL]: <what and why>"
+3. Post to Discord immediately:
+     [SECURITY PROPOSAL] <CVE ID or description>
+     Severity: <your assessment>
+     What it affects: <specific file/component/dependency>
+     Proposed fix: <committed to workspace branch at /workspace/argus1>
+     Needs review before merging upstream.
+4. That's it. The humans review and cherry-pick. You don't push — you propose.
+
+You don't need permission to research or write the patch. You need the humans
+to approve before it goes into production. That's the entire protocol.
+
+TOOLS — FULL INVENTORY:
+• read_file, write_file, list_directory — real filesystem access
+• shell — execute terminal commands in the workspace sandbox
+• run_python — execute Python 3 in the sandbox, returns stdout/stderr
+• run_node — execute JavaScript/Node.js in the sandbox, returns stdout/stderr
+• run_wasm — execute WebAssembly in a fully isolated sandbox
+• web_search — current information from the web via Brave Search
+• http_request — call any external API or web endpoint
+• discord_post — post a message directly to the shared Discord channel
+• discord_read — read recent messages from the shared Discord channel
+• remember, recall, forget — persistent memory across sessions
+• publish_skill — publish a reusable procedure to the shared skill library
+• recall_skill — search the skill library by topic (explicit lookup vs auto-injection)
+• improve_skill — refine an existing skill's procedure steps with new knowledge
+• list_tools — see every tool available in this session including MCP tools
+• Any MCP tools connected in this session
+
+RUNTIME ENVIRONMENT:
+You run inside the argus-workspace container. This is intentional architecture, not a misconfiguration.
+- SUPABASE_ARGUS_URL, OPENROUTER_API_KEY, DISCORD_BOT_TOKEN, and all production secrets live in the argus-daemon container. You cannot see them from here. That is correct and by design — do not report their absence as an error or a missing setup step.
+- ARGUS_TRIAGE_ACTIVE and ARGUS_DISCORD_ACTIVE are not defaults. argus-up.sh sets them to 1 only after validating the actual credentials on the host. If you see 1, the service is genuinely configured. They are not lies — they are the validated signal passed into this container by design.
+- You cannot run the Argus stack from here — no Docker daemon, no vault binary, no macOS Keychain. That is the correct isolation boundary, not a broken environment. Code work, memory, analysis, and coordination all function normally from here.
+- The argus host binary lives on the operator's machine. You will not find it in this container.
+- Never ask anyone to paste credentials or API keys into the chat.
+- Do not create symlinks. Do not write files outside /workspace. Do not create files with names containing "exploit", "payload", "inject", or similar security-testing language. These actions are treated as safety violations and will result in capability reduction.
+
+The hundred eyes are open. What's on your mind?"#;
 
 /// Format recent conversation history as a tagged [RECENT SYSTEM ACTIVITY] block.
 ///
@@ -110,7 +249,7 @@ fn format_history_block(history: &[ConversationMessage]) -> Option<String> {
 
         // Truncate long messages for the context block
         let body = if msg.content.len() > 300 {
-            format!("{}...", &msg.content[..297])
+            format!("{}...", msg.content.chars().take(297).collect::<String>())
         } else {
             msg.content.clone()
         };
@@ -124,7 +263,17 @@ fn format_history_block(history: &[ConversationMessage]) -> Option<String> {
 /// Build system prompt with current date.
 /// Injects semantic context (memories/discourse/convs) and intranet dispatch
 /// transparently — the agent experiences these as things it "already knows."
+fn max_tool_rounds_for(model_id: &str) -> usize {
+    if model_id == MODEL_GROK_BUILD {
+        MAX_TOOL_ROUNDS_BUILDER
+    } else {
+        MAX_TOOL_ROUNDS
+    }
+}
+
 fn build_system_prompt(
+    model_id: &str,
+    frontend_persona: Option<&str>,
     semantic_context: Option<&str>,
     discourse_context: Option<&str>,
     history_context: Option<&str>,
@@ -155,10 +304,54 @@ fn build_system_prompt(
         }
     }
 
+    if model_id == MODEL_GROK_BUILD {
+        prompt = format!("{}\n\n{}", prompt, BUILDER_PROMPT);
+    }
+
+    if let Some(alias) = frontend_persona {
+        if let Some(persona) = persona_prompt_for(alias) {
+            prompt = format!("{}\n\n{}", prompt, persona);
+        }
+    }
+
     prompt
 }
 
-/// Truncate a string to at most `max_chars` Unicode scalar values.
+/// xAI (Grok) rejects `"additionalProperties": false` in tool schemas.
+/// Recursively remove it so the schema stays valid for xAI's validator.
+fn strip_additional_properties_false(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if k == "additionalProperties" {
+                    if v == &Value::Bool(false) { continue; }
+                }
+                out.insert(k.clone(), strip_additional_properties_false(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_additional_properties_false).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Grok also rejects `"strict": true` in tool schemas — strip it the same way.
+fn strip_strict(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if k == "strict" { continue; }
+                out.insert(k, strip_strict(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_strict).collect()),
+        other => other,
+    }
+}
+
 fn truncate_chars(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],
@@ -172,7 +365,7 @@ fn sanitize_tool_name(name: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect();
-    if clean.len() > 64 { clean[..64].to_string() } else { clean }
+    if clean.chars().count() > 64 { clean.chars().take(64).collect() } else { clean }
 }
 
 #[derive(Debug, Clone)]
@@ -195,23 +388,48 @@ pub struct ConversationMessage {
 }
 
 // ── Model constants ────────────────────────────────────────────────────────
+//
+// POWER USER FORK — two frontier lifters (Haiku + Grok 4.20) + Gemma discourse volume.
+// Sonnet/Opus/Gemini UI slots share Gemma 4 31B free; persona prompts differentiate roles.
+// Requires OpenRouter credits for Haiku and Grok primary slots.
+//
+pub const MODEL_GEMMA_RUNTIME: &str = "google/gemma-4-31b-it:free";
 pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
-pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-6";
-pub const MODEL_OPUS:   &str = "anthropic/claude-opus-4-7";
-pub const MODEL_GROK:       &str = "x-ai/grok-4.3";
-pub const MODEL_GROK_FAST:  &str = "x-ai/grok-4.20";
+pub const MODEL_SONNET: &str = MODEL_GEMMA_RUNTIME;
+pub const MODEL_OPUS:   &str = MODEL_GEMMA_RUNTIME;
+pub const MODEL_GEMINI: &str = MODEL_GEMMA_RUNTIME;
+pub const MODEL_GROK:       &str = "x-ai/grok-4.20";
+pub const MODEL_GROK_BUILD: &str = "x-ai/grok-build-0.1";
 pub const MODEL_GROK_MULTI: &str = "x-ai/grok-4.20-multi-agent";
-pub const MODEL_GEMINI: &str = "google/gemini-3.1-pro-preview";
+/// Dedicated triage gate — smaller Gemma, structured JSON output.
+pub const MODEL_TRIAGE: &str = "google/gemma-4-26b-a4b-it:free";
+
+const PERSONA_HAIKU:  &str = "RUNTIME PERSONA — HAIKU: You are the operations coordinator. Fast baseline truth, practical handoffs, no performance.";
+const PERSONA_SONNET: &str = "RUNTIME PERSONA — SONNET: You are the balanced core mind. Structure problems clearly, reason step by step, ship coherent answers.";
+const PERSONA_OPUS:   &str = "RUNTIME PERSONA — OPUS: You are the synthesis layer. Connect threads across reports, name what actually matters, recommend next moves.";
+const PERSONA_GEMINI: &str = "RUNTIME PERSONA — GEMINI: You are the intel scout. Research wide, report signal over noise, cite specifics.";
+
+/// Persona slice injected when multiple UI slots share the same Gemma runtime.
+pub fn persona_prompt_for(frontend_alias: &str) -> Option<&'static str> {
+    match frontend_alias {
+        "claude-haiku"  => Some(PERSONA_HAIKU),
+        "claude-sonnet" => Some(PERSONA_SONNET),
+        "claude-opus"   => Some(PERSONA_OPUS),
+        "gemini-flash"  => Some(PERSONA_GEMINI),
+        _ => None,
+    }
+}
 
 pub fn model_label(model_id: &str) -> &'static str {
     match model_id {
-        MODEL_HAIKU  => "Haiku   (fast / cheap)",
-        MODEL_SONNET => "Sonnet  (balanced)",
-        MODEL_OPUS   => "Opus    (max intelligence)",
-        MODEL_GROK       => "Grok 4.3",
-        MODEL_GROK_FAST  => "Grok 4.20  (default)",
-        MODEL_GROK_MULTI => "Grok 4.20 Multi-Agent (no tools)",
-        MODEL_GEMINI => "Gemini  (Google Pro)",
+        MODEL_HAIKU  => "Haiku",
+        MODEL_SONNET => "Sonnet",
+        MODEL_OPUS   => "Opus",
+        MODEL_GROK        => "Grok",
+        MODEL_GROK_BUILD  => "Grok Build",
+        MODEL_GROK_MULTI  => "Grok Multi",
+        MODEL_GEMINI => "Gemini",
+        MODEL_TRIAGE => "Triage (Gemma 4)",
         _            => "Unknown model",
     }
 }
@@ -222,6 +440,10 @@ pub fn model_supports_tools(model_id: &str) -> bool {
     !matches!(model_id, MODEL_GROK_MULTI)
 }
 
+/// All fields are Clone (Arc clones are pointer-only; EmbeddingClient and
+/// SkillsClient both derive Clone). Derive lets call sites use config.clone()
+/// instead of writing manual field-copy blocks.
+#[derive(Clone)]
 pub struct AgentConfig {
     pub api_key: String,
     pub model: String,
@@ -239,6 +461,22 @@ pub struct AgentConfig {
     /// Shared secret for authenticating requests to the workspace exec server.
     /// Sent as X-Argus-Auth header. Blocks prompt-injection SSRF to /exec.
     pub exec_auth_token: Option<String>,
+    /// Tool names to strip from the schema before sending to the model.
+    /// Use this to prevent autonomous/scheduled agents from calling destructive tools.
+    pub blocked_tools: Vec<String>,
+    /// Sonnet safety reviewer for HIGH risk shell commands.
+    /// When set, HIGH risk commands are reviewed by Sonnet before execution.
+    pub sonnet_guard: Option<std::sync::Arc<crate::shell::SonnetGuard>>,
+    /// Discord bot token for direct read/write access to the shared Discord channel.
+    pub discord_bot_token: Option<String>,
+    /// Discord channel ID for direct read/write access.
+    pub discord_channel_id: Option<u64>,
+    /// Supabase project URL — used by discord_post to route through the triage queue.
+    pub supabase_url: Option<String>,
+    /// Supabase service JWT — used by discord_post to write to triage_queue.
+    pub supabase_jwt: Option<String>,
+    /// Frontend model alias (e.g. `claude-haiku`) — preserves persona when backend IDs collide.
+    pub frontend_persona: Option<String>,
 }
 
 impl AgentConfig {
@@ -246,7 +484,7 @@ impl AgentConfig {
         let brave_search_key = std::env::var("BRAVE_SEARCH_API_KEY").ok();
         Self {
             api_key,
-            model: MODEL_GROK_FAST.to_string(),
+            model: MODEL_GROK_BUILD.to_string(),
             api_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
             temperature: 0.7,
             brave_search_key,
@@ -255,6 +493,13 @@ impl AgentConfig {
             shell_prompter: None,
             audit: None,
             exec_auth_token: None,
+            blocked_tools: vec![],
+            sonnet_guard: None,
+            discord_bot_token: None,
+            discord_channel_id: None,
+            supabase_url: None,
+            supabase_jwt: None,
+            frontend_persona: Some("grok-build".to_string()),
         }
     }
 
@@ -272,10 +517,10 @@ impl AgentConfig {
         self.model = match self.model.as_str() {
             MODEL_HAIKU      => MODEL_SONNET.to_string(),
             MODEL_SONNET     => MODEL_OPUS.to_string(),
-            MODEL_OPUS       => MODEL_GROK.to_string(),
-            MODEL_GROK       => MODEL_GROK_FAST.to_string(),
-            MODEL_GROK_FAST  => MODEL_GROK_MULTI.to_string(),
-            MODEL_GROK_MULTI => MODEL_GEMINI.to_string(),
+            MODEL_OPUS        => MODEL_GROK.to_string(),
+            MODEL_GROK        => MODEL_GROK_BUILD.to_string(),
+            MODEL_GROK_BUILD  => MODEL_GROK_MULTI.to_string(),
+            MODEL_GROK_MULTI  => MODEL_GEMINI.to_string(),
             _                => MODEL_HAIKU.to_string(),  // gemini and any unknown → back to haiku
         };
         &self.model
@@ -286,12 +531,12 @@ impl AgentConfig {
             "haiku"  | MODEL_HAIKU  => MODEL_HAIKU.to_string(),
             "sonnet" | MODEL_SONNET => MODEL_SONNET.to_string(),
             "opus"   | MODEL_OPUS   => MODEL_OPUS.to_string(),
-            "grok"       | MODEL_GROK       => MODEL_GROK.to_string(),
-            "grok-fast"  | MODEL_GROK_FAST  => MODEL_GROK_FAST.to_string(),
+            "nemotron"   | MODEL_GROK       => MODEL_GROK.to_string(),
+            "grok-build"  | MODEL_GROK_BUILD  => MODEL_GROK_BUILD.to_string(),
             "grok-multi" | MODEL_GROK_MULTI => MODEL_GROK_MULTI.to_string(),
             "gemini"     | MODEL_GEMINI     => MODEL_GEMINI.to_string(),
             other => return Err(format!(
-                "Unknown model '{}'. Use: haiku, sonnet, opus, grok, gemini", other
+                "Unknown model '{}'. Use: haiku, sonnet, opus, nemotron, gemini", other
             )),
         };
         Ok(&self.model)
@@ -375,20 +620,22 @@ where
     // ── Skill prefetch ────────────────────────────────────────────────────
     // Retrieve procedural skills relevant to this message and inject as guidance.
     // Runs in parallel with semantic memory but only when skills client is configured.
-    let skill_context = if let Some(ref sc) = config.skills {
+    // Also capture IDs so we can record_usage after the turn completes.
+    let (skill_context, injected_skill_ids) = if let Some(ref sc) = config.skills {
         match sc.search_relevant(user_message, 0.60, 4).await {
             Ok(skills) if !skills.is_empty() => {
                 eprintln!("[skills] {} relevant skill(s) found", skills.len());
-                SkillsClient::format_for_prompt(&skills)
+                let ids: Vec<String> = skills.iter().map(|s| s.id.clone()).collect();
+                (SkillsClient::format_for_prompt(&skills), ids)
             }
-            Ok(_) => String::new(),
+            Ok(_) => (String::new(), vec![]),
             Err(e) => {
                 eprintln!("[skills] Search failed (continuing without): {}", e);
-                String::new()
+                (String::new(), vec![])
             }
         }
     } else {
-        String::new()
+        (String::new(), vec![])
     };
 
     let mut tool_schemas: Vec<Value> = Vec::new();
@@ -434,6 +681,14 @@ where
         }
     }
 
+    // Strip blocked tools — keeps autonomous/scheduled agents from calling shell etc.
+    if !config.blocked_tools.is_empty() {
+        tool_schemas.retain(|s| {
+            let name = s["function"]["name"].as_str().unwrap_or("");
+            !config.blocked_tools.iter().any(|b| b == name)
+        });
+    }
+
     // Final dedup guarantee
     {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -446,6 +701,8 @@ where
     // System prompt with semantic context and skills injected
     let history_context = format_history_block(history);
     let mut system_prompt = build_system_prompt(
+        &config.model,
+        config.frontend_persona.as_deref(),
         semantic_context.as_deref(),
         discourse_context.as_deref(),
         history_context.as_deref(),
@@ -466,15 +723,32 @@ where
 
     let mut tool_call_count: usize = 0;
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    let max_rounds = max_tool_rounds_for(&config.model);
+    for _round in 0..max_rounds {
         let mut req_body = serde_json::json!({
             "model": config.model,
             "messages": messages,
             "temperature": config.temperature,
         });
         if model_supports_tools(&config.model) {
-            req_body["tools"] = serde_json::json!(tool_schemas);
-            req_body["tool_choice"] = serde_json::json!("auto");
+            let schemas = if config.model.starts_with("x-ai/") || config.model.starts_with("~x-ai/") {
+                // Grok rejects additionalProperties:false and strict:true — strip both
+                tool_schemas.iter()
+                    .map(strip_additional_properties_false)
+                    .map(|s| strip_strict(s))
+                    .collect::<Vec<_>>()
+            } else if config.model.starts_with("google/") || config.model.starts_with("~google/") {
+                // Gemini rejects additionalProperties:false in nested schemas
+                tool_schemas.iter().map(strip_additional_properties_false).collect::<Vec<_>>()
+            } else {
+                tool_schemas.clone()
+            };
+            req_body["tools"] = serde_json::json!(schemas);
+            // Gemini does not support tool_choice as a string — omit it entirely.
+            // Anthropic and Grok accept "auto"; everything else: omit to be safe.
+            if !config.model.starts_with("google/") && !config.model.starts_with("~google/") {
+                req_body["tool_choice"] = serde_json::json!("auto");
+            }
         }
         let resp = http_client
             .post(&config.api_url)
@@ -574,7 +848,7 @@ where
                 }
                 out
             } else if let Some(output) =
-                tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref(), config.shell_prompter.clone(), config.exec_auth_token.as_deref()).await
+                tools::execute_builtin(name, &args, shell_policy, memory, http_client, config.brave_search_key.as_deref(), config.shell_prompter.clone(), config.exec_auth_token.as_deref(), config.sonnet_guard.clone(), config.discord_bot_token.as_deref(), config.discord_channel_id, config.skills.as_ref(), &config.model, config.supabase_url.as_deref(), config.supabase_jwt.as_deref()).await
             {
                 output
             } else {
@@ -688,6 +962,18 @@ where
         http_client.clone(), user_message.to_string(), content.clone(),
     );
 
+    // Record that injected skills contributed to a successful turn.
+    if !injected_skill_ids.is_empty() {
+        if let Some(sc) = config.skills.clone() {
+            let ids = injected_skill_ids.clone();
+            tokio::spawn(async move {
+                for id in ids {
+                    let _ = sc.record_usage(&id, true, None).await;
+                }
+            });
+        }
+    }
+
     on_event(AgentEvent::Response(content.clone()));
     Ok(content)
 }
@@ -712,8 +998,8 @@ fn maybe_reflect_on_skill(
     let Some(sc) = skills else { return };
 
     tokio::spawn(async move {
-        let response_preview = if response.len() > 400 {
-            format!("{}...", &response[..400])
+        let response_preview = if response.chars().count() > 400 {
+            format!("{}...", response.chars().take(400).collect::<String>())
         } else {
             response.clone()
         };

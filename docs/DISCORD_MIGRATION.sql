@@ -2,7 +2,7 @@
 -- ARGUS DISCORD INTRANET — pg_net webhook triggers
 -- April 22, 2026 — Bradlee Burton + Claude Sonnet
 --
--- Run on Thought Factory: YOUR_SUPABASE_PROJECT_ID
+-- Run on Thought Factory: xzkpvzpdkbjpavupgncu
 --
 -- When any agent writes to argus_agent_discourse,
 -- this trigger fires and POSTs to the right Discord channel.

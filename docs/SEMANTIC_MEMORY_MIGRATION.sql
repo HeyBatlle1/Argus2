@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- ARGUS SEMANTIC MEMORY LAYER
--- Thought Factory: YOUR_SUPABASE_PROJECT_ID
+-- Thought Factory: xzkpvzpdkbjpavupgncu
 -- April 2026 — Bradlee Burton + Claude Sonnet
 --
 -- Run this on the Thought Factory Supabase project.

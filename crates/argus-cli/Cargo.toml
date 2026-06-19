@@ -26,6 +26,8 @@ argus-crypto = { path = "../argus-crypto" }
 argus-core = { path = "../argus-core" }
 argus-memory = { path = "../argus-memory" }
 argus-audit = { path = "../argus-audit" }
+argus-sandbox = { path = "../argus-sandbox" }
+ring = { workspace = true }
 urlencoding = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }

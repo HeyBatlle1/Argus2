@@ -19,7 +19,10 @@ export function CollapsibleSection({ title, children, defaultOpen = true, count,
     <div className={`border-b border-argus-border ${className}`}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-white/[0.02] transition-colors group"
+        className="w-full flex items-center justify-between px-3 py-2 text-left transition-all cursor-pointer group"
+        style={{ background: 'var(--surface)' }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--surface-hi)'; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--surface)'; }}
       >
         <span className="flex items-center gap-2">
           <span className="text-[10px] font-mono tracking-widest uppercase text-argus-textDim group-hover:text-argus-amber transition-colors">
@@ -34,7 +37,7 @@ export function CollapsibleSection({ title, children, defaultOpen = true, count,
         <motion.span
           animate={{ rotate: open ? 0 : -90 }}
           transition={{ duration: 0.15 }}
-          className="text-argus-textDim"
+          className="text-argus-textDim group-hover:text-argus-amber transition-colors"
         >
           <ChevronDown size={12} />
         </motion.span>
