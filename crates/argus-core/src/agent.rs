@@ -389,15 +389,14 @@ pub struct ConversationMessage {
 
 // ── Model constants ────────────────────────────────────────────────────────
 //
-// POWER USER FORK — two frontier lifters (Haiku + Grok 4.20) + Gemma discourse volume.
-// Sonnet/Opus/Gemini UI slots share Gemma 4 31B free; persona prompts differentiate roles.
-// Requires OpenRouter credits for Haiku and Grok primary slots.
+// POWER USER FORK — funded roster (Jun 2026). Opus slot stays Gemma (cost cap).
+// See docs/MODEL_ROSTER_NOTE.md (synced from Argus1).
 //
 pub const MODEL_GEMMA_RUNTIME: &str = "google/gemma-4-31b-it:free";
 pub const MODEL_HAIKU:  &str = "anthropic/claude-haiku-4-5";
-pub const MODEL_SONNET: &str = MODEL_GEMMA_RUNTIME;
+pub const MODEL_SONNET: &str = "anthropic/claude-sonnet-4-6";
 pub const MODEL_OPUS:   &str = MODEL_GEMMA_RUNTIME;
-pub const MODEL_GEMINI: &str = MODEL_GEMMA_RUNTIME;
+pub const MODEL_GEMINI: &str = "google/gemini-3.1-pro-preview";
 pub const MODEL_GROK:       &str = "x-ai/grok-4.20";
 pub const MODEL_GROK_BUILD: &str = "x-ai/grok-build-0.1";
 pub const MODEL_GROK_MULTI: &str = "x-ai/grok-4.20-multi-agent";
@@ -409,13 +408,37 @@ const PERSONA_SONNET: &str = "RUNTIME PERSONA — SONNET: You are the balanced c
 const PERSONA_OPUS:   &str = "RUNTIME PERSONA — OPUS: You are the synthesis layer. Connect threads across reports, name what actually matters, recommend next moves.";
 const PERSONA_GEMINI: &str = "RUNTIME PERSONA — GEMINI: You are the intel scout. Research wide, report signal over noise, cite specifics.";
 
-/// Persona slice injected when multiple UI slots share the same Gemma runtime.
+/// Model for the 4-week monthly synthesis (Opus when funded, else Grok).
+pub fn monthly_synthesis_model() -> &'static str {
+    if MODEL_OPUS != MODEL_GEMMA_RUNTIME {
+        MODEL_OPUS
+    } else {
+        MODEL_GROK
+    }
+}
+
+/// Discourse label for monthly synthesis posts (honest about runtime).
+pub fn monthly_synthesis_agent_label() -> &'static str {
+    if MODEL_OPUS != MODEL_GEMMA_RUNTIME {
+        "argus-opus/synthesis"
+    } else {
+        "argus-grok/monthly-synthesis"
+    }
+}
+
+/// Banner line for monthly synthesis posts.
+pub fn monthly_synthesis_banner() -> &'static str {
+    if MODEL_OPUS != MODEL_GEMMA_RUNTIME {
+        "MONTHLY SYNTHESIS — OPUS"
+    } else {
+        "MONTHLY SYNTHESIS — GROK (Opus slot on economy hold)"
+    }
+}
+
+/// Persona slice for slots that still run Gemma under a different UI label.
 pub fn persona_prompt_for(frontend_alias: &str) -> Option<&'static str> {
     match frontend_alias {
-        "claude-haiku"  => Some(PERSONA_HAIKU),
-        "claude-sonnet" => Some(PERSONA_SONNET),
-        "claude-opus"   => Some(PERSONA_OPUS),
-        "gemini-flash"  => Some(PERSONA_GEMINI),
+        "claude-opus" => Some(PERSONA_OPUS),
         _ => None,
     }
 }

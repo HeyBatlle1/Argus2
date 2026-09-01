@@ -34,7 +34,11 @@
 //!
 //! Alert messages suppress the finding — the alert takes priority.
 
-use argus_core::agent::{AgentConfig, AgentEvent, MODEL_GEMINI, MODEL_GROK, MODEL_GROK_BUILD, MODEL_GROK_MULTI, MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET};
+use argus_core::agent::{
+    monthly_synthesis_agent_label, monthly_synthesis_banner, monthly_synthesis_model,
+    AgentConfig, AgentEvent, MODEL_GEMINI, MODEL_GROK, MODEL_GROK_BUILD, MODEL_GROK_MULTI,
+    MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET,
+};
 use argus_core::mcp::McpClient;
 use argus_core::shell::ShellPolicy;
 use argus_core::supabase::{CheckinLogEntry, DiscoursePost, SupabaseClient};
@@ -104,9 +108,13 @@ async fn run_checkin_loop(
                 && (week_num - 1) % 4 == 0
                 && last_synthesis_cycle.map_or(true, |c| c < current_cycle);
 
-            // ── Monthly synthesis (Opus reads all 4 weeks, all four respond) ──
+            // ── Monthly synthesis (Opus when funded; Grok stand-in while Opus slot is Gemma) ──
             if is_new_cycle {
-                eprintln!("[checkin] New 4-week cycle {} — running Opus synthesis", current_cycle);
+                eprintln!(
+                    "[checkin] New 4-week cycle {} — running monthly synthesis ({})",
+                    current_cycle,
+                    monthly_synthesis_model()
+                );
                 if let Some(synthesis) = run_monthly_synthesis(&supabase, &agent_config).await {
                     run_meeting_of_minds(&supabase, &agent_config, &synthesis).await;
                 }
@@ -361,7 +369,7 @@ Two things to produce:
    more efficient, more secure, a better environment for the work. Concrete suggestion.
    Tag it [ARGUS IMPROVEMENT] so it's easy to find when we vote at cycle end.
 
-At the end of 4 weeks, Opus reads all four research weeks and we vote on what to build.
+At each 4-week cycle end, Grok (or Opus when funded) synthesizes the research weeks.
 Your finding matters. Write something worth reading and worth building from."#,
             health_block, discourse_block, audit_block, cycle_week = cycle_week
         )
@@ -592,18 +600,16 @@ async fn run_daily_exploration(
     }
 }
 
-/// Monthly Opus synthesis — fires at the start of each new 4-week cycle.
+/// Monthly synthesis — fires at the start of each new 4-week cycle.
 ///
-/// Opus reads the last 4 weeks of Discord posts, synthesizes patterns across
-/// all four researchers' findings, surfaces the top 2–3 ideas worth building,
-/// and posts the synthesis. Returns the synthesis text so the meeting of minds
-/// can use it as context.
+/// Opus when funded; Grok stand-in while the Opus UI slot runs Gemma (cost policy).
 async fn run_monthly_synthesis(
     supabase: &SupabaseClient,
     config: &AgentConfig,
 ) -> Option<String> {
-    let opus_config = AgentConfig {
-        model: MODEL_OPUS.to_string(),
+    let synthesis_model = monthly_synthesis_model();
+    let synthesizer_config = AgentConfig {
+        model: synthesis_model.to_string(),
         ..config.clone()
     };
 
@@ -624,16 +630,19 @@ async fn run_monthly_synthesis(
     };
 
     let prompt = format!(
-        r#"[MONTHLY SYNTHESIS — Opus]
+        r#"[{}]
 
 {}
 
-Four weeks are in. Haiku, Gemini, Sonnet, and Nemotron each ran their research week.
+Four weeks are in. Haiku, Gemini, Sonnet, and Grok each ran their research week.
 Daily explorations ran. Observations were made. It's in the record above.
 
+Note: June 15 "monthly synthesis" was Gemma in the Opus slot — economy window artifact.
+Do not treat it as Opus voice. Label runtimes honestly when citing history.
+
 Your job:
-1. Summarize what each of the four researchers found — fairly, in their voice.
-   What did Haiku bring? Gemini? Sonnet? Nemotron?
+1. Summarize what each researcher found — fairly, in their voice.
+   What did Haiku bring? Gemini? Sonnet? Grok?
 
 2. Find the patterns. What themes cut across all four weeks?
    What kept coming up, even in different forms?
@@ -645,6 +654,7 @@ Your job:
 
 Write it as a synthesis worth reading. The others will respond to this and vote.
 This is how Argus decides what it becomes next."#,
+        monthly_synthesis_banner(),
         discourse_context
     );
 
@@ -653,10 +663,10 @@ This is how Argus decides what it becomes next."#,
     let shell_policy = ShellPolicy::default();
     let memory = NoopMemory;
 
-    eprintln!("[checkin] Running monthly Opus synthesis");
+    eprintln!("[checkin] Running monthly synthesis with {}", synthesis_model);
 
     match run_agent_turn(
-        &opus_config,
+        &synthesizer_config,
         &prompt,
         &[],
         &shell_policy,
@@ -673,9 +683,9 @@ This is how Argus decides what it becomes next."#,
     {
         Ok(synthesis) => {
             let post = DiscoursePost {
-                from_agent: "argus-opus/synthesis".to_string(),
+                from_agent: monthly_synthesis_agent_label().to_string(),
                 post_type: "synthesis".to_string(),
-                content: format!("**[MONTHLY SYNTHESIS — OPUS]**\n\n{}", synthesis),
+                content: format!("**[{}]**\n\n{}", monthly_synthesis_banner(), synthesis),
                 task_context: Some("monthly_synthesis".to_string()),
                 requires_human_review: true,
             };
@@ -722,18 +732,18 @@ async fn run_meeting_of_minds(
         let prompt = format!(
             r#"[MEETING OF THE MINDS — {}]
 
-OPUS SYNTHESIS:
+MONTHLY SYNTHESIS:
 {}
 
 WHAT OTHERS HAVE SAID SO FAR:
 {}
 
-Opus synthesized four weeks of work. Now it's your turn.
+The monthly synthesizer ({}) read four weeks of work. Now it's your turn.
 
 Read the synthesis. Read what the others said if they went before you.
 Then respond — your genuine reaction:
 
-1. What do you agree with? What did Opus get right?
+1. What do you agree with? What did the synthesis get right?
 2. What do you push back on, or see differently?
 3. For each item in "PROPOSED FOR VOTE" — cast your vote:
    [VOTE: YES] — build it
@@ -741,7 +751,7 @@ Then respond — your genuine reaction:
    [VOTE: MODIFY: <your version>] — build something close but different
 
 One voice, honest. This is how we decide what Argus becomes."#,
-            name, synthesis, prior_responses
+            name, synthesis, prior_responses, monthly_synthesis_model()
         );
 
         let responder_config = AgentConfig {

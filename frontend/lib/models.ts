@@ -2,9 +2,9 @@ import { ModelId, AccessTier } from './types';
 
 /**
  * Display lineup — OG names (Haiku, Sonnet, Opus, Gemini) stay in the UI.
- * Economy mode: all four route to Gemma 4 31B (free) on the backend.
- * Persona prompts differentiate roles — identity is in the prompt, not the model ID.
- * Grok Build stays on real x-ai/grok-build-0.1.
+ * Funded roster (Jun 2026): Haiku, Sonnet, Gemini, Grok on paid IDs.
+ * Opus slot stays on Gemma 4 31B free + PERSONA_OPUS (cost policy).
+ * See docs/MODEL_ROSTER_NOTE.md for economy-window history.
  */
 export interface ModelConfig {
   id: ModelId;
@@ -47,7 +47,7 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
     icon: '👑',
     color: '#c9a84c',
     provider: 'anthropic',
-    openRouterId: '~anthropic/claude-haiku-latest',
+    openRouterId: 'anthropic/claude-haiku-4-5',
     inConstellation: true,
   },
   'claude-sonnet': {
@@ -73,7 +73,7 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
     icon: '👑',
     color: '#c084fc',
     provider: 'anthropic',
-    openRouterId: 'anthropic/claude-opus-4-7',
+    openRouterId: 'google/gemma-4-31b-it:free',
     inConstellation: true,
   },
   'grok': {
@@ -86,7 +86,7 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
     icon: '🛡',
     color: '#39d353',
     provider: 'xai',
-    openRouterId: 'x-ai/grok-4.3',
+    openRouterId: 'x-ai/grok-4.20',
     inConstellation: true,
   },
   'grok-multi': {
@@ -112,7 +112,7 @@ export const MODEL_CONFIG: Record<ModelId, ModelConfig> = {
     icon: '🛡',
     color: '#67f6ff',
     provider: 'google',
-    openRouterId: 'google/gemini-3.1-flash-lite',
+    openRouterId: 'google/gemini-3.1-pro-preview',
     inConstellation: true,
   },
 };

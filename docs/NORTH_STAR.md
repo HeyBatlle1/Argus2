@@ -16,12 +16,15 @@
 | Slot | Model | Role |
 |------|-------|------|
 | Haiku | `anthropic/claude-haiku-4-5` | Fast frontier ops |
+| Sonnet | `anthropic/claude-sonnet-4-6` | Balanced core mind |
+| Opus | `google/gemma-4-31b-it:free` | Synthesis slot — Gemma + persona (Opus too costly) |
+| Gemini | `google/gemini-3.1-pro-preview` | Intel scout |
 | Grok | `x-ai/grok-4.20` | Primary lifter / adversarial reasoning |
-| Sonnet / Opus / Gemini (discourse) | `google/gemma-4-31b-it:free` | High-volume intranet agents (persona prompts) |
 | Triage | `google/gemma-4-26b-a4b-it:free` | Structured JSON gate |
 | Grok Build | `x-ai/grok-build-0.1` | Coding specialist |
 
-Requires OpenRouter credits for Haiku + Grok. Gemma slots stay on free tier for discourse volume.
+Requires OpenRouter credits for Haiku, Sonnet, Gemini, Grok. Opus stays on free Gemma by policy.
+See [`MODEL_ROSTER_NOTE.md`](./MODEL_ROSTER_NOTE.md) for economy-window history.
 
 ## Build order
 
